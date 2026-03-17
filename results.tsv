@@ -1,25 +1,121 @@
-timestamp	backend	precision	tokens_per_sec	ttft_ms	latency_ms	tokens	memory_mb	notes
-baseline	mlx	fp16	30.0	100	3300	100	2000	Expected baseline for M1/M2 from research
-baseline	transformers	fp16	15.0	200	6600	100	2500	PyTorch MPS baseline
-2026-03-17T17:26:35.030117	mlx	fp16	22.64	2208.6	2208.6	50	3675	
-2026-03-17T17:26:35.030150	mlx_quantized	4bit	66.63	750.4	750.4	50	-2250	
-2026-03-17T17:26:35.030155	mlx_quantized	8bit	39.64	1261.3	1261.3	50	954	
-2026-03-17T17:27:19.987255	mlx	fp16	22.64	2208.1	2208.1	50	3673	
-2026-03-17T17:27:19.987277	mlx_quantized	4bit	67.08	745.4	745.4	50	-3807	
-2026-03-17T17:27:19.987281	mlx_quantized	8bit	40.30	1240.6	1240.6	50	1936	
-2026-03-17T17:40:13.937480	transformers	fp16	13.69	3652.7	3652.7	50	143	
-2026-03-17T17:40:13.937508	mlx	fp16	14.26	3507.4	3507.4	50	-300	
-2026-03-17T17:40:13.937517	mlx_quantized	4bit	46.57	1073.5	1073.5	50	585	
-2026-03-17T17:40:13.937522	mlx_quantized	8bit	26.41	1893.4	1893.4	50	2781	
-2026-03-17T17:43:41.566644	mlx	fp16	22.74	2198.4	2198.4	50	3674	
-2026-03-17T17:43:41.566653	mlx_quantized	4bit	67.41	741.7	741.7	50	-2568	
-2026-03-17T17:43:41.566656	mlx_quantized	8bit	40.26	1241.9	1241.9	50	949	
-2026-03-17T17:45:06.259814	mlx	fp16	22.74	2199.1	2199.1	50	3675	
-2026-03-17T17:45:06.259824	mlx_quantized	4bit	67.34	742.5	742.5	50	-2567	
-2026-03-17T17:45:06.259827	mlx_quantized	8bit	40.27	1241.7	1241.7	50	950	
-2026-03-17T17:45:48.219504	mlx	fp16	22.73	2199.8	2199.8	50	3674	
-2026-03-17T17:45:48.219514	mlx_quantized	4bit	67.43	741.5	741.5	50	-2564	
-2026-03-17T17:45:48.219517	mlx_quantized	8bit	40.50	1234.7	1234.7	50	947	
-2026-03-17T17:46:32.491529	mlx	fp16	22.74	2198.5	2198.5	50	3673	
-2026-03-17T17:46:32.491539	mlx_quantized	4bit	67.47	741.1	741.1	50	-2568	
-2026-03-17T17:46:32.491542	mlx_quantized	8bit	40.32	1240.1	1240.1	50	951	
+commit	stage	seq_len	latency_ms	context	max_batch	tok_sec	ttft_ms	ms_per_tok	memory_mb	mfu_or_bw_util	bottleneck	accuracy_pct	status	description
+c61ca5e	prefill	32	-	-	-	390.1	82	-	0	0.29	COMPUTE_BOUND	100.0	keep	baseline run
+c61ca5e	prefill	64	-	-	-	604.5	106	-	0	0.45	COMPUTE_BOUND	100.0	keep	baseline run
+c61ca5e	prefill	128	-	-	-	773.0	166	-	0	0.57	COMPUTE_BOUND	100.0	keep	baseline run
+c61ca5e	prefill	256	-	-	-	908.8	282	-	0	0.67	COMPUTE_BOUND	100.0	keep	baseline run
+c61ca5e	prefill	512	-	-	-	1082.5	473	-	0	0.80	COMPUTE_BOUND	100.0	keep	baseline run
+c61ca5e	prefill	1024	-	-	-	1125.7	910	-	0	0.83	COMPUTE_BOUND	100.0	keep	baseline run
+c61ca5e	prefill	2048	-	-	-	1150.0	1781	-	0	0.85	COMPUTE_BOUND	100.0	keep	baseline run
+c61ca5e	prefill	4096	-	-	-	1154.3	3548	-	0	0.86	COMPUTE_BOUND	100.0	keep	baseline run
+c61ca5e	prefill	8192	-	-	-	1133.9	7224	-	0	0.84	COMPUTE_BOUND	100.0	keep	baseline run
+c61ca5e	prefill	16384	-	-	-	1055.3	15525	-	0	0.78	COMPUTE_BOUND	100.0	keep	baseline run
+c61ca5e	decode	-	20	256	0	0.0	-	20.4	2417	0.00	CONSTRAINT_EXCEEDED	100.0	keep	baseline run
+c61ca5e	decode	-	30	256	1	49.0	-	20.4	2417	12.10	MEMORY_BOUND	100.0	keep	baseline run
+c61ca5e	decode	-	50	256	1	49.0	-	20.4	2417	12.11	MEMORY_BOUND	100.0	keep	baseline run
+c61ca5e	decode	-	100	256	1	49.2	-	20.3	2417	12.15	MEMORY_BOUND	100.0	keep	baseline run
+c61ca5e	decode	-	none	256	1	49.2	-	20.3	2417	12.14	MEMORY_BOUND	100.0	keep	baseline run
+c61ca5e	decode	-	20	1024	0	0.0	-	20.5	2417	0.00	CONSTRAINT_EXCEEDED	100.0	keep	baseline run
+c61ca5e	decode	-	30	1024	1	48.7	-	20.5	2417	12.04	MEMORY_BOUND	100.0	keep	baseline run
+c61ca5e	decode	-	50	1024	1	48.8	-	20.5	2417	12.05	MEMORY_BOUND	100.0	keep	baseline run
+c61ca5e	decode	-	100	1024	1	48.7	-	20.5	2417	12.04	MEMORY_BOUND	100.0	keep	baseline run
+c61ca5e	decode	-	none	1024	1	48.6	-	20.6	2417	12.02	MEMORY_BOUND	100.0	keep	baseline run
+f66980c	prefill	32	-	-	-	411.8	78	-	-0	0.31	COMPUTE_BOUND	100.0	keep	baseline run
+f66980c	prefill	64	-	-	-	590.2	108	-	0	0.44	COMPUTE_BOUND	100.0	keep	baseline run
+f66980c	prefill	128	-	-	-	769.8	166	-	0	0.57	COMPUTE_BOUND	100.0	keep	baseline run
+f66980c	prefill	256	-	-	-	910.8	281	-	0	0.67	COMPUTE_BOUND	100.0	keep	baseline run
+f66980c	prefill	512	-	-	-	1078.6	475	-	0	0.80	COMPUTE_BOUND	100.0	keep	baseline run
+f66980c	prefill	1024	-	-	-	1123.7	911	-	0	0.83	COMPUTE_BOUND	100.0	keep	baseline run
+f66980c	prefill	2048	-	-	-	1149.7	1781	-	0	0.85	COMPUTE_BOUND	100.0	keep	baseline run
+f66980c	prefill	4096	-	-	-	1137.4	3601	-	0	0.84	COMPUTE_BOUND	100.0	keep	baseline run
+f66980c	prefill	8192	-	-	-	1117.7	7330	-	0	0.83	COMPUTE_BOUND	100.0	keep	baseline run
+f66980c	prefill	16384	-	-	-	1029.8	15910	-	-0	0.76	COMPUTE_BOUND	100.0	keep	baseline run
+f66980c	decode	-	20	256	0	0.0	-	20.5	2431	0.00	CONSTRAINT_EXCEEDED	100.0	keep	baseline run
+f66980c	decode	-	30	256	1	48.9	-	20.4	2431	12.08	MEMORY_BOUND	100.0	keep	baseline run
+f66980c	decode	-	50	256	1	49.1	-	20.4	2431	12.12	MEMORY_BOUND	100.0	keep	baseline run
+f66980c	decode	-	100	256	1	49.0	-	20.4	2431	12.09	MEMORY_BOUND	100.0	keep	baseline run
+f66980c	decode	-	none	256	1	49.1	-	20.4	2431	12.13	MEMORY_BOUND	100.0	keep	baseline run
+f66980c	decode	-	20	1024	0	0.0	-	20.5	2431	0.00	CONSTRAINT_EXCEEDED	100.0	keep	baseline run
+f66980c	decode	-	30	1024	1	48.7	-	20.5	2431	12.03	MEMORY_BOUND	100.0	keep	baseline run
+f66980c	decode	-	50	1024	1	48.7	-	20.5	2431	12.03	MEMORY_BOUND	100.0	keep	baseline run
+f66980c	decode	-	100	1024	1	48.7	-	20.5	2431	12.04	MEMORY_BOUND	100.0	keep	baseline run
+f66980c	decode	-	none	1024	1	48.7	-	20.5	2431	12.03	MEMORY_BOUND	100.0	keep	baseline run
+f66980c	prefill	32	-	-	-	418.7	76	-	0	0.31	COMPUTE_BOUND	100.0	keep	baseline run
+f66980c	prefill	64	-	-	-	576.7	111	-	0	0.43	COMPUTE_BOUND	100.0	keep	baseline run
+f66980c	prefill	128	-	-	-	760.9	168	-	-0	0.56	COMPUTE_BOUND	100.0	keep	baseline run
+f66980c	prefill	256	-	-	-	910.6	281	-	0	0.67	COMPUTE_BOUND	100.0	keep	baseline run
+f66980c	prefill	512	-	-	-	1075.2	476	-	0	0.80	COMPUTE_BOUND	100.0	keep	baseline run
+f66980c	prefill	1024	-	-	-	1121.6	913	-	0	0.83	COMPUTE_BOUND	100.0	keep	baseline run
+f66980c	prefill	2048	-	-	-	1140.6	1795	-	0	0.84	COMPUTE_BOUND	100.0	keep	baseline run
+f66980c	prefill	4096	-	-	-	1138.3	3598	-	0	0.84	COMPUTE_BOUND	100.0	keep	baseline run
+f66980c	prefill	8192	-	-	-	1068.5	7667	-	-0	0.79	COMPUTE_BOUND	100.0	keep	baseline run
+f66980c	prefill	16384	-	-	-	938.0	17467	-	0	0.69	COMPUTE_BOUND	100.0	keep	baseline run
+f66980c	decode	-	20	256	0	0.0	-	22.1	150	0.00	CONSTRAINT_EXCEEDED	100.0	keep	baseline run
+f66980c	decode	-	30	256	1	45.5	-	22.0	150	11.24	MEMORY_BOUND	100.0	keep	baseline run
+f66980c	decode	-	50	256	1	45.3	-	22.1	150	11.19	MEMORY_BOUND	100.0	keep	baseline run
+f66980c	decode	-	100	256	1	45.5	-	22.0	150	11.23	MEMORY_BOUND	100.0	keep	baseline run
+f66980c	decode	-	none	256	1	45.5	-	22.0	150	11.25	MEMORY_BOUND	100.0	keep	baseline run
+f66980c	decode	-	20	1024	0	0.0	-	22.1	151	0.00	CONSTRAINT_EXCEEDED	100.0	keep	baseline run
+f66980c	decode	-	30	1024	1	45.1	-	22.1	151	11.15	MEMORY_BOUND	100.0	keep	baseline run
+f66980c	decode	-	50	1024	1	44.9	-	22.3	151	11.09	MEMORY_BOUND	100.0	keep	baseline run
+f66980c	decode	-	100	1024	1	45.5	-	22.0	151	11.23	MEMORY_BOUND	100.0	keep	baseline run
+f66980c	decode	-	none	1024	1	44.5	-	22.5	151	11.00	MEMORY_BOUND	100.0	keep	baseline run
+f66980c	prefill	32	-	-	-	395.7	81	-	-0	0.29	COMPUTE_BOUND	100.0	keep	baseline run
+f66980c	prefill	64	-	-	-	568.9	113	-	0	0.42	COMPUTE_BOUND	100.0	keep	baseline run
+f66980c	prefill	128	-	-	-	752.9	170	-	0	0.56	COMPUTE_BOUND	100.0	keep	baseline run
+f66980c	prefill	256	-	-	-	921.5	278	-	0	0.68	COMPUTE_BOUND	100.0	keep	baseline run
+f66980c	prefill	512	-	-	-	1060.2	483	-	0	0.79	COMPUTE_BOUND	100.0	keep	baseline run
+f66980c	prefill	1024	-	-	-	1106.0	926	-	-0	0.82	COMPUTE_BOUND	100.0	keep	baseline run
+f66980c	prefill	2048	-	-	-	1130.5	1812	-	0	0.84	COMPUTE_BOUND	100.0	keep	baseline run
+f66980c	prefill	4096	-	-	-	1118.8	3661	-	0	0.83	COMPUTE_BOUND	100.0	keep	baseline run
+f66980c	prefill	8192	-	-	-	1051.0	7794	-	0	0.78	COMPUTE_BOUND	100.0	keep	baseline run
+f66980c	prefill	16384	-	-	-	959.6	17074	-	0	0.71	COMPUTE_BOUND	100.0	keep	baseline run
+f66980c	decode	-	20	256	0	0.0	-	21.9	421	0.00	CONSTRAINT_EXCEEDED	100.0	keep	baseline run
+f66980c	decode	-	30	256	1	45.6	-	22.0	421	11.25	MEMORY_BOUND	100.0	keep	baseline run
+f66980c	decode	-	50	256	1	45.6	-	21.9	421	11.26	MEMORY_BOUND	100.0	keep	baseline run
+f66980c	decode	-	100	256	1	45.3	-	22.1	421	11.20	MEMORY_BOUND	100.0	keep	baseline run
+f66980c	decode	-	none	256	1	45.6	-	21.9	421	11.26	MEMORY_BOUND	100.0	keep	baseline run
+f66980c	decode	-	20	1024	0	0.0	-	22.1	422	0.00	CONSTRAINT_EXCEEDED	100.0	keep	baseline run
+f66980c	decode	-	30	1024	1	45.4	-	22.0	422	11.22	MEMORY_BOUND	100.0	keep	baseline run
+f66980c	decode	-	50	1024	1	45.5	-	22.0	422	11.24	MEMORY_BOUND	100.0	keep	baseline run
+f66980c	decode	-	100	1024	1	45.6	-	22.0	422	11.25	MEMORY_BOUND	100.0	keep	baseline run
+f66980c	decode	-	none	1024	1	45.4	-	22.0	422	11.23	MEMORY_BOUND	100.0	keep	baseline run
+6453148	prefill	32	-	-	-	398.3	80	-	0	0.30	COMPUTE_BOUND	100.0	keep	baseline run
+6453148	prefill	64	-	-	-	577.6	111	-	-0	0.43	COMPUTE_BOUND	100.0	keep	baseline run
+6453148	prefill	128	-	-	-	765.3	167	-	0	0.57	COMPUTE_BOUND	100.0	keep	baseline run
+6453148	prefill	256	-	-	-	903.7	283	-	0	0.67	COMPUTE_BOUND	100.0	keep	baseline run
+6453148	prefill	512	-	-	-	1043.6	491	-	0	0.77	COMPUTE_BOUND	100.0	keep	baseline run
+6453148	prefill	1024	-	-	-	1093.6	936	-	0	0.81	COMPUTE_BOUND	100.0	keep	baseline run
+6453148	prefill	2048	-	-	-	1114.9	1837	-	0	0.83	COMPUTE_BOUND	100.0	keep	baseline run
+6453148	prefill	4096	-	-	-	1109.6	3692	-	0	0.82	COMPUTE_BOUND	100.0	keep	baseline run
+6453148	prefill	8192	-	-	-	1024.9	7993	-	-0	0.76	COMPUTE_BOUND	100.0	keep	baseline run
+6453148	prefill	16384	-	-	-	936.7	17492	-	0	0.69	COMPUTE_BOUND	100.0	keep	baseline run
+6453148	decode	-	20	256	0	0.0	-	22.4	337	0.00	CONSTRAINT_EXCEEDED	100.0	keep	baseline run
+6453148	decode	-	30	256	1	44.9	-	22.3	337	11.08	MEMORY_BOUND	100.0	keep	baseline run
+6453148	decode	-	50	256	1	44.9	-	22.3	337	11.08	MEMORY_BOUND	100.0	keep	baseline run
+6453148	decode	-	100	256	1	44.9	-	22.3	337	11.08	MEMORY_BOUND	100.0	keep	baseline run
+6453148	decode	-	none	256	1	44.7	-	22.4	337	11.04	MEMORY_BOUND	100.0	keep	baseline run
+6453148	decode	-	20	1024	0	0.0	-	22.4	338	0.00	CONSTRAINT_EXCEEDED	100.0	keep	baseline run
+6453148	decode	-	30	1024	1	44.6	-	22.4	338	11.03	MEMORY_BOUND	100.0	keep	baseline run
+6453148	decode	-	50	1024	1	44.5	-	22.5	338	11.00	MEMORY_BOUND	100.0	keep	baseline run
+6453148	decode	-	100	1024	1	44.7	-	22.4	338	11.03	MEMORY_BOUND	100.0	keep	baseline run
+6453148	decode	-	none	1024	1	44.7	-	22.4	338	11.04	MEMORY_BOUND	100.0	keep	baseline run
+6453148	prefill	32	-	-	-	390.5	82	-	-0	0.29	COMPUTE_BOUND	100.0	keep	baseline run
+6453148	prefill	64	-	-	-	577.7	111	-	0	0.43	COMPUTE_BOUND	100.0	keep	baseline run
+6453148	prefill	128	-	-	-	760.4	168	-	0	0.56	COMPUTE_BOUND	100.0	keep	baseline run
+6453148	prefill	256	-	-	-	899.2	285	-	0	0.67	COMPUTE_BOUND	100.0	keep	baseline run
+6453148	prefill	512	-	-	-	1043.6	491	-	0	0.77	COMPUTE_BOUND	100.0	keep	baseline run
+6453148	prefill	1024	-	-	-	1092.7	937	-	-0	0.81	COMPUTE_BOUND	100.0	keep	baseline run
+6453148	prefill	2048	-	-	-	1116.7	1834	-	0	0.83	COMPUTE_BOUND	100.0	keep	baseline run
+6453148	prefill	4096	-	-	-	1109.3	3692	-	0	0.82	COMPUTE_BOUND	100.0	keep	baseline run
+6453148	prefill	8192	-	-	-	1039.1	7884	-	0	0.77	COMPUTE_BOUND	100.0	keep	baseline run
+6453148	prefill	16384	-	-	-	943.0	17374	-	0	0.70	COMPUTE_BOUND	100.0	keep	baseline run
+6453148	decode	-	20	256	0	0.0	-	22.3	197	0.00	CONSTRAINT_EXCEEDED	100.0	keep	baseline run
+6453148	decode	-	30	256	1	44.7	-	22.4	197	11.04	MEMORY_BOUND	100.0	keep	baseline run
+6453148	decode	-	50	256	1	44.7	-	22.3	197	11.05	MEMORY_BOUND	100.0	keep	baseline run
+6453148	decode	-	100	256	1	45.0	-	22.2	197	11.10	MEMORY_BOUND	100.0	keep	baseline run
+6453148	decode	-	none	256	1	44.7	-	22.4	197	11.05	MEMORY_BOUND	100.0	keep	baseline run
+6453148	decode	-	20	1024	0	0.0	-	22.4	197	0.00	CONSTRAINT_EXCEEDED	100.0	keep	baseline run
+6453148	decode	-	30	1024	1	44.2	-	22.6	197	10.93	MEMORY_BOUND	100.0	keep	baseline run
+6453148	decode	-	50	1024	1	44.5	-	22.5	197	10.98	MEMORY_BOUND	100.0	keep	baseline run
+6453148	decode	-	100	1024	1	44.6	-	22.4	197	11.01	MEMORY_BOUND	100.0	keep	baseline run
+6453148	decode	-	none	1024	1	44.3	-	22.6	197	10.95	MEMORY_BOUND	100.0	keep	baseline run

@@ -39,7 +39,12 @@ ACCURACY_MAX_TOKENS = 50
 # Optimization flags
 USE_STREAM = True
 PREFETCH_STEP_SIZE = 8192  # Larger step for better throughput
-USE_COMPILE = True  # Enable mx.compile() for kernel fusion
+USE_COMPILE = False  # mx.compile() doesn't help with cached KV
+
+# KV cache quantization (memory optimization for decode)
+KV_BITS = None  # No quantization - 8-bit didn't help performance
+KV_GROUP_SIZE = 64
+KV_QUANT_START = 0
 
 # Results file
 RESULTS_FILE = "results.tsv"
@@ -245,7 +250,8 @@ def benchmark_prefill(model, tokenizer, stream, chip_info) -> List[PrefillResult
 
         # Warmup
         mx.clear_cache()
-        gen = generate_step(prompt_tokens, model, max_tokens=1, prefill_step_size=PREFETCH_STEP_SIZE)
+        gen = generate_step(prompt_tokens, model, max_tokens=1, prefill_step_size=PREFETCH_STEP_SIZE,
+                          kv_bits=KV_BITS, kv_group_size=KV_GROUP_SIZE, quantized_kv_start=KV_QUANT_START)
         _ = next(gen, None)
         del gen
 
@@ -256,7 +262,8 @@ def benchmark_prefill(model, tokenizer, stream, chip_info) -> List[PrefillResult
             mem_before = get_memory_mb()
             start = time.perf_counter()
 
-            gen = generate_step(prompt_tokens, model, max_tokens=1, prefill_step_size=PREFETCH_STEP_SIZE)
+            gen = generate_step(prompt_tokens, model, max_tokens=1, prefill_step_size=PREFETCH_STEP_SIZE,
+                              kv_bits=KV_BITS, kv_group_size=KV_GROUP_SIZE, quantized_kv_start=KV_QUANT_START)
             first_token, _ = next(gen)
 
             ttft_ms = (time.perf_counter() - start) * 1000
@@ -307,7 +314,8 @@ def benchmark_decode(model, tokenizer, stream, chip_info) -> List[DecodeResult]:
         for constraint in DECODE_LATENCY_CONSTRAINTS:
             # Warmup first
             mx.clear_cache()
-            gen = generate_step(context_tokens, model, max_tokens=5, prefill_step_size=PREFETCH_STEP_SIZE)
+            gen = generate_step(context_tokens, model, max_tokens=5, prefill_step_size=PREFETCH_STEP_SIZE,
+                              kv_bits=KV_BITS, kv_group_size=KV_GROUP_SIZE, quantized_kv_start=KV_QUANT_START)
             for _ in gen:
                 pass
             del gen
@@ -318,7 +326,8 @@ def benchmark_decode(model, tokenizer, stream, chip_info) -> List[DecodeResult]:
                 mx.clear_cache()
                 start_total = time.perf_counter()
 
-                gen = generate_step(context_tokens, model, max_tokens=DECODE_TOKENS, prefill_step_size=PREFETCH_STEP_SIZE)
+                gen = generate_step(context_tokens, model, max_tokens=DECODE_TOKENS, prefill_step_size=PREFETCH_STEP_SIZE,
+                                  kv_bits=KV_BITS, kv_group_size=KV_GROUP_SIZE, quantized_kv_start=KV_QUANT_START)
                 tokens_gen = 0
                 ttft = None
 
