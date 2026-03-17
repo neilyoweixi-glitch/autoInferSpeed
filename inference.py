@@ -38,7 +38,8 @@ ACCURACY_MAX_TOKENS = 50
 
 # Optimization flags
 USE_STREAM = True
-PREFETCH_STEP_SIZE = 2048
+PREFETCH_STEP_SIZE = 8192  # Larger step for better throughput
+USE_COMPILE = True  # Enable mx.compile() for kernel fusion
 
 # Results file
 RESULTS_FILE = "results.tsv"
