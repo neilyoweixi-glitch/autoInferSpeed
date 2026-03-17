@@ -1,49 +1,36 @@
-# InferenceSpeed - Mac Mini Edition
+# autoInferSpeed
 
-Autonomous LLM inference optimization research. Goal: maximize tokens/sec for batch_size=1 using Qwen models on Apple Silicon.
+Autonomous inference optimization for **Qwen3.5-2B 8-bit** on Apple Silicon.
 
-## How It Works
+## Quick reference
 
-1. **Agent modifies** `benchmark.py` - backends, quantization, model selection
-2. **Runs benchmark** - tests different configurations
-3. **Metric: tokens_per_sec** - higher is better
-4. **Logs to** `results.tsv`
+- **Agent instructions**: See `program.md` for the full autonomous experiment protocol.
+- **Human overview**: See `README.md` for project context and quick start.
+- **Agent modifies**: `benchmark.py` only (may also create kernel `.py` files).
+- **Model**: Qwen3.5-2B 8-bit — fixed, do not change.
+- **Metric**: `tokens_per_sec` — higher is better.
+- **Constraint**: `batch_size=1` — always fixed.
+- **Correctness**: Every run must pass accuracy verification vs baseline reference outputs.
+- **Roofline**: Every run reports bandwidth utilization and bottleneck type.
+- **Results log**: `results.tsv` (untracked by git).
 
 ## Files
 
-- `benchmark.py` - Benchmark runner (AGENT MODIFIES THIS)
-- `results.tsv` - Experiment log
-- `CLAUDE.md` - This file
-
-## Running Benchmarks
-
-```bash
-python benchmark.py
+```
+benchmark.py    — inference harness + accuracy + roofline (AGENT MODIFIES THIS)
+program.md      — autonomous agent protocol (HUMAN MODIFIES THIS)
+results.tsv     — experiment log (untracked)
+pyproject.toml  — dependencies
+README.md       — project overview
+CLAUDE.md       — this file
 ```
 
-## Baselines (from research)
+## Running
 
-| Backend | Expected tok/s | Notes |
-|---------|----------------|-------|
-| Transformers MPS | 20-40 | Baseline |
-| MLX | 40-80 | 2x improvement |
-| MLX 4-bit | 60-100 | Quantization speedup |
-| llama.cpp | 40-70 | GGUF format |
+```bash
+uv run benchmark.py
+```
 
-Source: [MLX benchmarks](https://www.reddit.com/r/LocalLLaMA/comments/1rs059a/mlx_is_not_faster_i_benchmarked_mlx_vs_llamacpp/), [Qwen on Mac](https://dev.to/thefalkedguy/installing-qwen-35-on-apple-silicon-using-mlx-for-2x-performance-37ma)
+## Current baseline
 
-## Things to Experiment With
-
-- Model size (Qwen3-0.6B, Qwen3-1.7B, Qwen3-4B)
-- Precision (fp32, fp16, bf16)
-- Quantization (4-bit, 8-bit, GGUF)
-- Backend (transformers, MLX, llama.cpp)
-- KV cache settings
-- Batch size effects (though we fix at 1)
-- Prompt length effects
-
-## Goals
-
-- Target: >60 tok/s on Mac M1/M2
-- Minimize TTFT (time to first token)
-- Minimize memory usage
+Qwen3.5-2B 8-bit via MLX: ~40 tok/s, ~1900 MB memory.
