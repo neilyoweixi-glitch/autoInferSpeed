@@ -27,7 +27,7 @@ PREFETCH_STEP_SIZE = 2048  # Increase prefill step size for better throughput
 
 # Speculative decoding (use smaller model as draft)
 USE_SPECULATIVE = True
-DRAFT_MODEL_NAME = "mlx-community/Qwen3.5-0.8B-OptiQ-4bit"  # Smaller draft model
+DRAFT_MODEL_NAME = "mlx-community/Qwen3.5-0.8B-OptiQ-4bit"  # Best performing draft model
 
 # Metal profiling (set to True to capture Metal trace for debugging)
 METAL_CAPTURE = False
