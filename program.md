@@ -6,7 +6,6 @@ This is an experiment to have the LLM autonomously maximize inference speed for 
 
 - **Model**: Qwen3.5-2B 8-bit quantized (`mlx-community/Qwen3.5-2B-8bit`). Do not switch models. All optimizations must target this exact model.
 - **Backend**: MLX only. Apple Silicon native. No Transformers, vLLM, SGLang, or Ollama.
-- **Batch size**: Always 1. Single-request interactive inference.
 - **Correctness**: Every optimization must pass the accuracy verification suite. Speed without correctness is worthless.
 
 ## Setup
@@ -96,7 +95,49 @@ Each experiment runs on Apple Silicon. You launch it simply as: `uv run inferenc
 - Skip or weaken the accuracy verification.
 - Modify any other files in the repo (except `results.tsv` for logging).
 
-**The goal: maximize tokens_per_sec for Qwen3.5-2B 8-bit with batch_size=1, while maintaining output correctness, and report how close you are to the hardware roofline.**
+**The goal: maximize prefill and decode performance for Qwen3.5-2B 8-bit, while maintaining output correctness, and report how close you are to the hardware roofline for each stage.**
+
+### Prefill vs decode: two separate optimization targets
+
+Inference has two distinct stages with different computational profiles. The benchmark MUST measure and optimize them separately.
+
+**Prefill stage** (processing the input prompt):
+- All input tokens are processed in parallel in a single forward pass.
+- This is **compute-bound**: arithmetic intensity = `2 * params * seq_len / params_bytes` = `2 * seq_len` (for 8-bit weights). Even at seq_len=64, this is well above the ridge point on Apple Silicon.
+- The metric is **prefill tokens/sec** (input tokens processed per second) or equivalently **time-to-first-token (TTFT)**.
+- Must be benchmarked at multiple sequence lengths to understand scaling:
+  - Short: 32, 64 tokens (chatbot greetings, quick queries)
+  - Medium: 256, 512 tokens (typical conversations, code snippets)
+  - Long: 1024, 2048 tokens (long documents, RAG contexts)
+- The roofline for prefill is FLOP/s-based, not bandwidth-based. Report MFU (achieved FLOP/s vs peak GPU TFLOP/s).
+- Optimizations: fused kernels, tiling for Metal SIMD width, `mx.compile()`, larger `prefill_step_size`, chunked prefill to balance latency.
+
+**Decode stage** (generating output tokens autoregressively):
+- Each token step reads the full model weights + KV cache. One token out per step.
+- At **batch_size=1**: purely **memory-bandwidth-bound**. The metric is **decode tokens/sec**.
+- At **higher batch sizes**: arithmetic intensity increases. The critical batch size where decode shifts from memory-bound to compute-bound is: `batch_crit = peak_bandwidth_bytes / (2 * params_bytes * peak_flops)`. For M4 with 8-bit Qwen3.5-2B: `batch_crit ≈ 120 GB/s / (2 * 2.47 GB * 5.4 TFLOP/s) ≈ ~4-5`. Above this, you become compute-bound.
+- Benchmark decode at multiple batch sizes: **1, 2, 4, 8** (if memory permits).
+- For batch_size > 1, report both **throughput** (total tok/s across all sequences) and **per-request latency** (ms per token per sequence). There is a tradeoff: higher batch = more throughput but worse per-request latency.
+- Latency constraint modes:
+  - **Interactive** (batch=1): minimize per-token latency. Target < 25ms/token.
+  - **Throughput** (batch=4-8): maximize total tok/s. Accept up to 100ms/token per request.
+- Optimizations: KV cache quantization, continuous batching, memory-aligned weight layout, weight prefetching.
+
+**Benchmark output format** (replaces the current unified format):
+
+```
+PREFILL BENCHMARK
+  seq_len=32:    TTFT=12ms   prefill_tok/s=2667   MFU=74%
+  seq_len=256:   TTFT=48ms   prefill_tok/s=5333   MFU=89%
+  seq_len=1024:  TTFT=185ms  prefill_tok/s=5535   MFU=92%
+  seq_len=2048:  TTFT=390ms  prefill_tok/s=5252   MFU=88%
+
+DECODE BENCHMARK
+  batch=1:  tok/s=40.3   ms/tok=24.8   bandwidth_util=99%  bottleneck=MEMORY_BOUND
+  batch=2:  tok/s=72.1   ms/tok=27.7   bandwidth_util=89%  bottleneck=MEMORY_BOUND
+  batch=4:  tok/s=125.0  ms/tok=32.0   bandwidth_util=77%  bottleneck=COMPUTE_BOUND
+  batch=8:  tok/s=180.2  ms/tok=44.4   bandwidth_util=56%  bottleneck=COMPUTE_BOUND
+```
 
 ### Hardware roofline analysis
 
@@ -122,18 +163,24 @@ Every benchmark run should report how close the achieved throughput is to the th
    - `OVERHEAD_BOUND`: neither GPU nor memory saturated → limited by framework overhead, kernel launch latency, CPU-side work
    - `CPU_BOUND`: CPU is the bottleneck (tokenization, pre/post-processing)
 
-**Roofline output format:**
+**Roofline output format** (separate for prefill and decode):
 
 ```
 ROOFLINE ANALYSIS
-  chip: Apple M2 (8-core GPU, 100 GB/s bandwidth)
+  chip: Apple M4 (10-core GPU, 120 GB/s bandwidth, 5.4 TFLOPS)
   model_size: 2.47 GB (8-bit quantized)
-  roofline_tok_s: 40.5 tok/s (memory-bound limit)
-  actual_tok_s: 40.3 tok/s
-  bandwidth_util: 99.5%
-  bottleneck: MEMORY_BOUND
-  gpu_active: 78% of wall time
-  cpu_overhead: 22% of wall time
+
+  PREFILL ROOFLINE (compute-bound regime)
+    peak_flops: 5.4 TFLOPS
+    seq_len=256: achieved 4.8 TFLOPS (MFU=89%)
+    seq_len=1024: achieved 5.0 TFLOPS (MFU=92%)
+    bottleneck: COMPUTE_BOUND
+
+  DECODE ROOFLINE (memory-bandwidth-bound at batch=1)
+    roofline_tok_s: 48.6 tok/s (120 GB/s / 2.47 GB)
+    batch=1: actual 40.3 tok/s, bandwidth_util=83%
+    batch=4: actual 125.0 tok/s, shifted to COMPUTE_BOUND
+    batch_critical: ~5 (crossover point)
 ```
 
 ### Ideas to try — kernel and hardware level
@@ -217,30 +264,35 @@ ACCURACY VERIFICATION (vs baseline)
 
 When an experiment is done, log it to `results.tsv` (tab-separated, NOT comma-separated).
 
-The TSV has a header row and 9 columns:
+The TSV has a header row and 12 columns:
 
 ```
-commit	tok_sec	memory_mb	bandwidth_util	bottleneck	accuracy	accuracy_pct	status	description
+commit	stage	seq_len_or_batch	tok_sec	ttft_ms	ms_per_tok	memory_mb	mfu_or_bw_util	bottleneck	accuracy	accuracy_pct	status	description
 ```
 
 1. git commit hash (short, 7 chars)
-2. tokens_per_sec achieved
-3. memory in MB
-4. bandwidth utilization as fraction (e.g. 0.995)
-5. bottleneck type: `MEMORY_BOUND`, `COMPUTE_BOUND`, `OVERHEAD_BOUND`, `CPU_BOUND`
-6. accuracy result: `PASS`, `WARN`, `FAIL`
-7. average token match percentage (e.g. 96.0)
-8. status: `keep`, `discard`, or `crash`
-9. short text description of what this experiment tried
+2. stage: `prefill` or `decode`
+3. seq_len (for prefill) or batch_size (for decode)
+4. tokens_per_sec (prefill: input tok/s, decode: output tok/s)
+5. TTFT in ms (prefill only, `-` for decode)
+6. ms per token (decode: per-request latency, `-` for prefill)
+7. memory in MB
+8. MFU fraction (prefill) or bandwidth_util fraction (decode)
+9. bottleneck type: `MEMORY_BOUND`, `COMPUTE_BOUND`, `OVERHEAD_BOUND`, `CPU_BOUND`
+10. accuracy result: `PASS`, `WARN`, `FAIL`
+11. average token match percentage (e.g. 96.0)
+12. status: `keep`, `discard`, or `crash`
+13. short text description of what this experiment tried
 
 Example:
 
 ```
-commit	tok_sec	memory_mb	bandwidth_util	bottleneck	accuracy	accuracy_pct	status	description
-a1b2c3d	40.30	1900	0.995	MEMORY_BOUND	PASS	100.0	keep	baseline (8-bit, default MLX)
-b2c3d4e	42.10	1850	0.98	MEMORY_BOUND	PASS	98.0	keep	pre-allocate KV cache, fuse RMSNorm
-c3d4e5f	41.80	1900	0.97	MEMORY_BOUND	FAIL	72.0	discard	aggressive KV cache quantization (broke accuracy)
-d4e5f6g	43.50	1950	0.92	OVERHEAD_BOUND	PASS	96.0	keep	custom Metal matmul kernel for 8-bit
+commit	stage	seq_or_batch	tok_sec	ttft_ms	ms_per_tok	memory_mb	mfu_or_bw	bottleneck	accuracy	accuracy_pct	status	description
+a1b2c3d	prefill	256	5333	48	-	1900	0.89	COMPUTE_BOUND	PASS	100.0	keep	baseline prefill
+a1b2c3d	prefill	1024	5535	185	-	1900	0.92	COMPUTE_BOUND	PASS	100.0	keep	baseline prefill
+a1b2c3d	decode	1	40.3	-	24.8	1900	0.83	MEMORY_BOUND	PASS	100.0	keep	baseline decode batch=1
+a1b2c3d	decode	4	125.0	-	32.0	2100	0.77	COMPUTE_BOUND	PASS	100.0	keep	baseline decode batch=4
+b2c3d4e	decode	1	43.5	-	23.0	1950	0.90	MEMORY_BOUND	PASS	98.0	keep	fused RMSNorm + KV cache quant
 ```
 
 ## The experiment loop
@@ -250,17 +302,17 @@ The experiment runs on a dedicated branch (e.g. `autoinfer/mar17`).
 LOOP FOREVER:
 
 1. Look at the git state: the current branch/commit we're on.
-2. Check the roofline analysis from the last run to identify the current bottleneck.
-3. Choose an optimization that targets the identified bottleneck. Don't optimize memory bandwidth if you're overhead-bound.
+2. Check the roofline analysis from the last run. Look at **both** prefill and decode results to identify the current bottleneck for each stage.
+3. Choose an optimization and which stage it targets. Some optimizations (e.g. fused kernels) help both; others are stage-specific (e.g. KV cache quantization only helps decode, chunked prefill only helps prefill).
 4. Modify `inference.py` (and optionally create kernel files) with the optimization.
 5. `git commit` the change.
 6. Run the experiment: `uv run inference.py > run.log 2>&1` (redirect everything — do NOT let output flood your context).
-7. Read out the results: `grep "tok_sec\|bandwidth_util\|bottleneck\|OVERALL\|Error" run.log` or `tail -n 30 run.log`.
-8. **Check accuracy first**: If accuracy is FAIL, the optimization is immediately rejected — discard and revert. Do not try to "fix" a broken optimization by loosening accuracy criteria.
+7. Read out the results: `grep "prefill\|decode\|tok_sec\|MFU\|bandwidth_util\|bottleneck\|OVERALL\|Error" run.log` or `tail -n 50 run.log`.
+8. **Check accuracy first**: If accuracy is FAIL, the optimization is immediately rejected — discard and revert.
 9. If the output shows errors or no results, the run crashed. Run `tail -n 50 run.log` to read the stack trace and attempt a fix.
-10. Record the results in the TSV (NOTE: do not commit the results.tsv file, leave it untracked by git).
-11. If tok/s improved AND accuracy is PASS or WARN, you "advance" the branch, keeping the git commit.
-12. If tok/s is equal or worse, or accuracy is FAIL, you `git reset` back to where you started.
+10. Record the results in the TSV — one row per (stage, seq_len/batch) combination. (NOTE: do not commit results.tsv, leave it untracked by git).
+11. If the targeted metric improved AND accuracy is PASS or WARN, you "advance" the branch, keeping the git commit.
+12. If no improvement, or accuracy is FAIL, you `git reset` back to where you started.
 
 **Bottleneck-driven optimization**: After each run, the roofline analysis tells you where the bottleneck is. Use this to guide your next experiment:
 - If `OVERHEAD_BOUND` → reduce Python overhead, improve kernel launch, pre-allocate buffers
@@ -272,4 +324,7 @@ LOOP FOREVER:
 
 **NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a good stopping point?". The human might be asleep, or gone from a computer and expects you to continue working *indefinitely* until you are manually stopped. You are autonomous. If you run out of ideas, think harder — read the roofline data, profile the bottleneck, try combining approaches, write custom kernels. The loop runs until the human interrupts you, period.
 
-**Convergence**: If bandwidth utilization exceeds 95% and you cannot find further improvements, note this in the TSV description. You are likely at the hardware limit. Try shifting focus to TTFT optimization or CPU+GPU co-execution to squeeze out remaining gains. But do not stop — keep trying creative approaches.
+**Convergence**:
+- If **decode** bandwidth utilization exceeds 95% at batch=1, you are near the memory-bandwidth limit. Shift to: (a) higher batch sizes to move into compute-bound territory, (b) prefill optimization, or (c) CPU+GPU co-execution.
+- If **prefill** MFU exceeds 90%, you are near the compute limit. Shift to: (a) decode optimization, (b) chunked prefill for latency, or (c) explore whether longer sequences reveal new bottlenecks.
+- If both stages are converged, focus on combined end-to-end latency for realistic workloads (e.g. 256-token prompt + 50-token generation). But do not stop — keep trying creative approaches.
