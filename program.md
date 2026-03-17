@@ -121,7 +121,7 @@ Inference has two distinct stages with different computational profiles. The ben
 | 2048 | Full document, long RAG | < 400 ms | Upper bound for snappy interactive feel |
 | 4096 | Long document, multi-doc RAG | < 800 ms | Chunked prefill may help here — stream partial results while still prefilling |
 | 8192 | Full codebase context, book chapters | < 1600 ms | Memory pressure becomes real — activations compete with model weights for bandwidth |
-| 16384 | Maximum context window | < 3200 ms | Stress test: OOM risk on 8GB machines. Chunked prefill mandatory. May need activation checkpointing |
+| 16384 | Maximum context window | < 3200 ms | Stress test: OOM risk on 8GB machines. Chunked prefill likely needed. May require activation checkpointing or smaller `prefill_step_size` |
 
 The benchmark MUST test all 10 sequence lengths in every run. Use synthetic prompts (repeated token sequences) to control exact length — the accuracy suite uses separate real prompts.
 
