@@ -40,6 +40,7 @@ ACCURACY_MAX_TOKENS = 50
 USE_STREAM = True
 PREFETCH_STEP_SIZE = 8192  # Larger step for better throughput
 USE_COMPILE = False  # mx.compile() doesn't help with cached KV
+USE_ASYNC_EVAL = True  # Use mx.async_eval() for overlapping
 
 # KV cache quantization (memory optimization for decode)
 KV_BITS = None  # No quantization - 8-bit didn't help performance
