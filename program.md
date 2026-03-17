@@ -118,59 +118,84 @@ Inference has two distinct stages with different computational profiles. The ben
 | 256 | Code snippet, multi-turn context | < 50 ms | Good proxy for real interactive use |
 | 512 | Long conversation, summarization prompt | < 100 ms | Still feels instant to user |
 | 1024 | RAG context, document chunk | < 200 ms | Noticeable but acceptable |
-| 2048 | Full document, long RAG | < 400 ms | Upper bound for interactive; beyond this, chunked prefill with streaming is preferred |
+| 2048 | Full document, long RAG | < 400 ms | Upper bound for snappy interactive feel |
+| 4096 | Long document, multi-doc RAG | < 800 ms | Chunked prefill may help here — stream partial results while still prefilling |
+| 8192 | Full codebase context, book chapters | < 1600 ms | Memory pressure becomes real — activations compete with model weights for bandwidth |
+| 16384 | Maximum context window | < 3200 ms | Stress test: OOM risk on 8GB machines. Chunked prefill mandatory. May need activation checkpointing |
 
-The benchmark MUST test all 7 sequence lengths in every run. Use synthetic prompts (repeated token sequences) to control exact length — the accuracy suite uses separate real prompts.
+The benchmark MUST test all 10 sequence lengths in every run. Use synthetic prompts (repeated token sequences) to control exact length — the accuracy suite uses separate real prompts.
 
-At short seq lengths (32-64), watch for **overhead-bound** behavior where kernel launch and Python overhead dominate. At long seq lengths (1024-2048), watch for **memory pressure** — the activations for a 2048-token prefill on a 2B model are ~1GB, which competes with model weights for unified memory bandwidth.
+**Regime transitions to watch:**
+- **Short (32-64)**: overhead-bound — kernel launch and Python overhead dominate, not compute.
+- **Medium (128-1024)**: compute-bound — this is where MFU should peak. The GPU is doing useful work.
+- **Long (2048-4096)**: compute-bound but approaching memory pressure — activations for a 2048-token prefill on 2B model are ~1GB, competing with model weights for unified memory bandwidth.
+- **Very long (8192-16384)**: memory-pressure-bound — activations alone are 4-8GB. Chunked prefill (process input in chunks, stream KV cache to memory) becomes necessary. MFU may drop as chunks introduce pipeline bubbles. On 8GB machines, 16K may OOM — log this as a constraint, not a failure.
 
 **Decode stage** (generating output tokens autoregressively):
 - Each token step reads the full model weights + KV cache. One token out per step.
 - At **batch_size=1**: purely **memory-bandwidth-bound**. The metric is **decode tokens/sec**.
 - At **higher batch sizes**: arithmetic intensity increases. The critical batch size where decode shifts from memory-bound to compute-bound is: `batch_crit = peak_bandwidth_bytes / (2 * params_bytes * peak_flops)`. For M4 with 8-bit Qwen3.5-2B: `batch_crit ≈ 120 GB/s / (2 * 2.47 GB * 5.4 TFLOP/s) ≈ ~4-5`. Above this, you become compute-bound.
-- For batch_size > 1, report both **throughput** (total tok/s across all sequences) and **per-request latency** (ms per token per sequence). There is a tradeoff: higher batch = more throughput but worse per-request latency.
+- For batch_size > 1, report both **throughput** (total tok/s across all sequences) and **per-request latency** (ms per token per sequence).
 - Optimizations: KV cache quantization, continuous batching, memory-aligned weight layout, weight prefetching.
 
-**Decode batch size settings and latency constraints:**
+**Decode latency constraint modes:**
 
-| Batch | Mode | ms/tok target | Throughput goal | KV cache overhead |
-|-------|------|--------------|-----------------|-------------------|
-| 1 | Interactive | < 25 ms | maximize tok/s (baseline ~40) | Negligible — single sequence |
-| 2 | Interactive | < 30 ms | > 1.8x batch=1 tok/s | ~2x KV cache reads per step |
-| 4 | Balanced | < 50 ms | > 3x batch=1 tok/s | Near `batch_crit` — regime transition zone |
-| 8 | Throughput | < 100 ms | > 4x batch=1 tok/s | KV cache becomes significant memory traffic; may need KV quantization |
+Batch size is NOT fixed — it is **dynamically determined** to maximize throughput under each latency constraint. The benchmark sweeps batch sizes upward (1, 2, 4, 8, 16, ...) until the per-request latency exceeds the constraint, then reports the best (highest throughput) batch size that fits.
 
-The decode benchmark MUST generate **50 tokens per sequence** at each batch size. All sequences in a batch use the same 256-token prefilled context (to keep KV cache size uniform and comparable).
+| Latency constraint | Mode | Goal | Typical use case |
+|-------------------|------|------|-----------------|
+| < 20 ms/tok | Realtime | Minimum latency, likely batch=1 only | Typing-speed streaming, keystroke-level response |
+| < 30 ms/tok | Interactive | Low latency, may fit batch=1-2 | Chat UI streaming, voice assistant |
+| < 50 ms/tok | Balanced | Moderate latency, may fit batch=2-4 | Web API serving with good UX |
+| < 100 ms/tok | Throughput | Higher latency OK, may fit batch=4-8+ | Background processing, batch inference |
+| Unlimited | Max throughput | No latency constraint, push batch as high as possible | Offline batch jobs, benchmarking ceiling |
 
-**Latency constraint enforcement**: When benchmarking at a given batch size, if the achieved ms/tok exceeds the target, the result should be flagged as `LATENCY_EXCEEDED`. This is not a failure — the optimization is still logged — but the agent should note the tradeoff. The point is to map the Pareto frontier of throughput vs latency, not just blindly maximize throughput.
+For each latency constraint, the benchmark reports:
+- **max_batch**: the highest batch size where ms/tok stays within the constraint
+- **throughput**: total tok/s at that batch size (across all sequences in the batch)
+- **actual_ms_per_tok**: the achieved per-request latency
+- **headroom**: how much slack remains before hitting the constraint (`constraint - actual`)
 
-**KV cache scaling**: At batch=8 with 256-token context, the KV cache is approximately `batch * seq_len * 2 * num_layers * num_kv_heads * head_dim * dtype_bytes`. For Qwen3.5-2B (28 layers, 4 KV heads, 128 head_dim, fp16 KV): `8 * 256 * 2 * 28 * 4 * 128 * 2 ≈ 117 MB`. This is manageable. At 2048-token context, it grows to ~935 MB — watch for memory pressure on 8GB machines.
+The benchmark generates **50 tokens per sequence** at each tested batch size. The batch size sweep starts at 1 and doubles until either the latency constraint is exceeded or memory runs out (OOM). All sequences in a batch use the same prefilled context.
 
 **Decode context length interaction**: Decode performance degrades as context grows because each step reads more KV cache. Test decode at two context depths:
 - **Short context** (256 tokens prefilled): measures raw decode speed with minimal KV cache overhead.
 - **Long context** (1024 tokens prefilled): measures decode under realistic KV cache pressure. The gap between short and long context decode reveals how much KV cache reads hurt — and whether KV cache quantization would help.
 
+**KV cache scaling**: KV cache size = `batch * seq_len * 2 * num_layers * num_kv_heads * head_dim * dtype_bytes`. For Qwen3.5-2B (28 layers, 4 KV heads, 128 head_dim, fp16 KV):
+- batch=1, ctx=256: ~15 MB (negligible)
+- batch=8, ctx=256: ~117 MB (manageable)
+- batch=8, ctx=1024: ~468 MB (significant on 8GB)
+- batch=16, ctx=1024: ~935 MB (may OOM on 8GB — log as constraint)
+
 **Benchmark output format** (replaces the current unified format):
 
 ```
 PREFILL BENCHMARK
-  seq_len=32:    TTFT=8ms    prefill_tok/s=4000   MFU=67%   [< 15ms OK]
-  seq_len=64:    TTFT=11ms   prefill_tok/s=5818   MFU=78%   [< 20ms OK]
-  seq_len=128:   TTFT=18ms   prefill_tok/s=7111   MFU=85%   [< 30ms OK]
-  seq_len=256:   TTFT=34ms   prefill_tok/s=7529   MFU=89%   [< 50ms OK]
-  seq_len=512:   TTFT=65ms   prefill_tok/s=7877   MFU=91%   [< 100ms OK]
-  seq_len=1024:  TTFT=140ms  prefill_tok/s=7314   MFU=92%   [< 200ms OK]
-  seq_len=2048:  TTFT=310ms  prefill_tok/s=6606   MFU=88%   [< 400ms OK]
+  seq_len=32:     TTFT=8ms     prefill_tok/s=4000    MFU=67%   [< 15ms OK]
+  seq_len=64:     TTFT=11ms    prefill_tok/s=5818    MFU=78%   [< 20ms OK]
+  seq_len=128:    TTFT=18ms    prefill_tok/s=7111    MFU=85%   [< 30ms OK]
+  seq_len=256:    TTFT=34ms    prefill_tok/s=7529    MFU=89%   [< 50ms OK]
+  seq_len=512:    TTFT=65ms    prefill_tok/s=7877    MFU=91%   [< 100ms OK]
+  seq_len=1024:   TTFT=140ms   prefill_tok/s=7314    MFU=92%   [< 200ms OK]
+  seq_len=2048:   TTFT=310ms   prefill_tok/s=6606    MFU=88%   [< 400ms OK]
+  seq_len=4096:   TTFT=680ms   prefill_tok/s=6024    MFU=84%   [< 800ms OK]
+  seq_len=8192:   TTFT=1520ms  prefill_tok/s=5389    MFU=79%   [< 1600ms OK]
+  seq_len=16384:  TTFT=3400ms  prefill_tok/s=4819    MFU=72%   [< 3200ms EXCEEDED]
 
 DECODE BENCHMARK (context=256)
-  batch=1:  tok/s=40.3   ms/tok=24.8   bw_util=83%  bottleneck=MEMORY_BOUND   [< 25ms OK]
-  batch=2:  tok/s=72.1   ms/tok=27.7   bw_util=74%  bottleneck=MEMORY_BOUND   [< 30ms OK]
-  batch=4:  tok/s=125.0  ms/tok=32.0   bw_util=64%  bottleneck=COMPUTE_BOUND  [< 50ms OK]
-  batch=8:  tok/s=180.2  ms/tok=44.4   bw_util=46%  bottleneck=COMPUTE_BOUND  [< 100ms OK]
+  constraint=20ms:   max_batch=1   tok/s=40.3    ms/tok=18.5   headroom=1.5ms    MEMORY_BOUND
+  constraint=30ms:   max_batch=2   tok/s=72.1    ms/tok=27.7   headroom=2.3ms    MEMORY_BOUND
+  constraint=50ms:   max_batch=4   tok/s=125.0   ms/tok=32.0   headroom=18.0ms   COMPUTE_BOUND
+  constraint=100ms:  max_batch=8   tok/s=180.2   ms/tok=44.4   headroom=55.6ms   COMPUTE_BOUND
+  constraint=none:   max_batch=16  tok/s=210.5   ms/tok=76.2   headroom=n/a      COMPUTE_BOUND
 
 DECODE BENCHMARK (context=1024)
-  batch=1:  tok/s=38.1   ms/tok=26.2   bw_util=78%  bottleneck=MEMORY_BOUND   [< 25ms EXCEEDED]
-  batch=4:  tok/s=110.5  ms/tok=36.2   bw_util=57%  bottleneck=COMPUTE_BOUND  [< 50ms OK]
+  constraint=20ms:   max_batch=1   tok/s=38.1    ms/tok=19.8   headroom=0.2ms    MEMORY_BOUND
+  constraint=30ms:   max_batch=1   tok/s=38.1    ms/tok=26.2   headroom=3.8ms    MEMORY_BOUND
+  constraint=50ms:   max_batch=4   tok/s=110.5   ms/tok=36.2   headroom=13.8ms   COMPUTE_BOUND
+  constraint=100ms:  max_batch=8   tok/s=155.0   ms/tok=51.6   headroom=48.4ms   COMPUTE_BOUND
+  constraint=none:   max_batch=8   tok/s=155.0   ms/tok=51.6   headroom=n/a      MEMORY_BOUND (KV cache)
 
 ACCURACY VERIFICATION (vs baseline)
   ...
@@ -302,37 +327,39 @@ ACCURACY VERIFICATION (vs baseline)
 
 When an experiment is done, log it to `results.tsv` (tab-separated, NOT comma-separated).
 
-The TSV has a header row and 14 columns:
+The TSV has a header row and 15 columns:
 
 ```
-commit	stage	seq_len	batch	context	tok_sec	ttft_ms	ms_per_tok	memory_mb	mfu_or_bw_util	bottleneck	accuracy_pct	status	description
+commit	stage	seq_len	latency_ms	context	max_batch	tok_sec	ttft_ms	ms_per_tok	memory_mb	mfu_or_bw_util	bottleneck	accuracy_pct	status	description
 ```
 
 1. git commit hash (short, 7 chars)
 2. stage: `prefill` or `decode`
 3. seq_len: input sequence length (prefill) or `-` (decode)
-4. batch: batch size (decode) or `-` (prefill)
+4. latency_ms: latency constraint in ms (decode) or `-` (prefill). Use `none` for unlimited.
 5. context: KV cache context depth in tokens (decode) or `-` (prefill)
-6. tokens_per_sec (prefill: input tok/s, decode: total output tok/s across batch)
-7. TTFT in ms (prefill only, `-` for decode)
-8. ms per token per request (decode only, `-` for prefill)
-9. memory in MB
-10. MFU fraction (prefill) or bandwidth_util fraction (decode)
-11. bottleneck type: `MEMORY_BOUND`, `COMPUTE_BOUND`, `OVERHEAD_BOUND`, `CPU_BOUND`
-12. average token match percentage from accuracy suite (e.g. 96.0)
-13. status: `keep`, `discard`, `crash`, or `latency_exceeded`
-14. short text description of what this experiment tried
+6. max_batch: dynamically determined best batch size (decode) or `-` (prefill)
+7. tokens_per_sec (prefill: input tok/s, decode: total output tok/s across batch)
+8. TTFT in ms (prefill only, `-` for decode)
+9. ms per token per request (decode: actual achieved, `-` for prefill)
+10. memory in MB
+11. MFU fraction (prefill) or bandwidth_util fraction (decode)
+12. bottleneck type: `MEMORY_BOUND`, `COMPUTE_BOUND`, `OVERHEAD_BOUND`, `CPU_BOUND`
+13. average token match percentage from accuracy suite (e.g. 96.0)
+14. status: `keep`, `discard`, `crash`, or `oom`
+15. short text description of what this experiment tried
 
 Example:
 
 ```
-commit	stage	seq_len	batch	context	tok_sec	ttft_ms	ms_per_tok	memory_mb	mfu_or_bw	bottleneck	accuracy_pct	status	description
-a1b2c3d	prefill	256	-	-	5333	48	-	1900	0.89	COMPUTE_BOUND	100.0	keep	baseline prefill
-a1b2c3d	prefill	1024	-	-	5535	185	-	1900	0.92	COMPUTE_BOUND	100.0	keep	baseline prefill
-a1b2c3d	decode	-	1	256	40.3	-	24.8	1900	0.83	MEMORY_BOUND	100.0	keep	baseline decode b=1 ctx=256
-a1b2c3d	decode	-	4	256	125.0	-	32.0	2100	0.64	COMPUTE_BOUND	100.0	keep	baseline decode b=4 ctx=256
-a1b2c3d	decode	-	1	1024	38.1	-	26.2	1950	0.78	MEMORY_BOUND	100.0	keep	baseline decode b=1 ctx=1024
-b2c3d4e	decode	-	1	256	43.5	-	23.0	1950	0.90	MEMORY_BOUND	98.0	keep	fused RMSNorm + KV quant
+commit	stage	seq_len	latency_ms	context	max_batch	tok_sec	ttft_ms	ms_per_tok	memory_mb	mfu_or_bw	bottleneck	accuracy_pct	status	description
+a1b2c3d	prefill	256	-	-	-	5333	48	-	1900	0.89	COMPUTE_BOUND	100.0	keep	baseline prefill
+a1b2c3d	prefill	4096	-	-	-	6024	680	-	2400	0.84	COMPUTE_BOUND	100.0	keep	baseline prefill
+a1b2c3d	decode	-	20	256	1	40.3	-	18.5	1900	0.83	MEMORY_BOUND	100.0	keep	baseline decode 20ms ctx=256
+a1b2c3d	decode	-	50	256	4	125.0	-	32.0	2100	0.64	COMPUTE_BOUND	100.0	keep	baseline decode 50ms ctx=256
+a1b2c3d	decode	-	none	256	16	210.5	-	76.2	2800	0.46	COMPUTE_BOUND	100.0	keep	baseline decode unlimited ctx=256
+a1b2c3d	decode	-	50	1024	4	110.5	-	36.2	2300	0.57	COMPUTE_BOUND	100.0	keep	baseline decode 50ms ctx=1024
+b2c3d4e	decode	-	20	256	1	43.5	-	17.2	1950	0.90	MEMORY_BOUND	98.0	keep	fused RMSNorm + KV quant
 ```
 
 ## The experiment loop
