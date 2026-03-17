@@ -26,8 +26,8 @@ USE_STREAM = True  # Use mx.stream() for async execution
 PREFETCH_STEP_SIZE = 2048  # Increase prefill step size for better throughput
 
 # Speculative decoding (use smaller model as draft)
-USE_SPECULATIVE = True
-DRAFT_MODEL_NAME = "mlx-community/Qwen3.5-0.8B-OptiQ-4bit"  # Best performing draft model
+USE_SPECULATIVE = False  # Disabled - exploring other optimization paths
+DRAFT_MODEL_NAME = None
 
 # Metal profiling (set to True to capture Metal trace for debugging)
 METAL_CAPTURE = False
@@ -450,18 +450,11 @@ def benchmark_mlx() -> Optional[Tuple[BenchmarkResult, RooflineResult, AccuracyS
 
         model, tokenizer = load(MODEL_NAME)
 
-        # Load draft model for speculative decoding
-        draft_model = None
-        if USE_SPECULATIVE:
-            try:
-                print(f"  Loading draft model: {DRAFT_MODEL_NAME}...")
-                draft_model, _ = load(DRAFT_MODEL_NAME)
-            except Exception as e:
-                print(f"  Warning: Could not load draft model: {e}")
-                draft_model = None
-
         # Create a stream for async execution on GPU
         stream = mx.stream(mx.gpu) if USE_STREAM else None
+
+        # No draft model - speculative decoding disabled
+        draft_model = None
 
         # Start Metal capture if enabled (for profiling)
         if METAL_CAPTURE:
