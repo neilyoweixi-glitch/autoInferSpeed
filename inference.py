@@ -16,14 +16,21 @@ from datetime import datetime
 MODEL_NAME = "mlx-community/Qwen3.5-2B-8bit"  # Fixed: 8-bit quantized via MLX
 PROMPT = "Write a short story about a robot learning to paint."
 MAX_TOKENS = 50
-NUM_WARMUP = 1
-NUM_RUNS = 3
+NUM_WARMUP = 3  # More warmup for JIT compilation
+NUM_RUNS = 5  # More runs for stable average
 BATCH_SIZE = 1  # Fixed per requirements
 ACCURACY_MAX_TOKENS = 50  # Tokens for accuracy verification
 
 # Async execution optimization
 USE_STREAM = True  # Use mx.stream() for async execution
 PREFETCH_STEP_SIZE = 2048  # Increase prefill step size for better throughput
+
+# Speculative decoding (use smaller model as draft)
+USE_SPECULATIVE = True
+DRAFT_MODEL_NAME = "mlx-community/Qwen3.5-0.8B-OptiQ-4bit"  # Smaller draft model
+
+# Metal profiling (set to True to capture Metal trace for debugging)
+METAL_CAPTURE = False
 
 # Results file
 RESULTS_FILE = "results.tsv"
@@ -443,8 +450,23 @@ def benchmark_mlx() -> Optional[Tuple[BenchmarkResult, RooflineResult, AccuracyS
 
         model, tokenizer = load(MODEL_NAME)
 
+        # Load draft model for speculative decoding
+        draft_model = None
+        if USE_SPECULATIVE:
+            try:
+                print(f"  Loading draft model: {DRAFT_MODEL_NAME}...")
+                draft_model, _ = load(DRAFT_MODEL_NAME)
+            except Exception as e:
+                print(f"  Warning: Could not load draft model: {e}")
+                draft_model = None
+
         # Create a stream for async execution on GPU
         stream = mx.stream(mx.gpu) if USE_STREAM else None
+
+        # Start Metal capture if enabled (for profiling)
+        if METAL_CAPTURE:
+            print("  Starting Metal capture for profiling...")
+            mx.metal.start_capture()
 
         def gen(prompt: str, max_tokens: int) -> Tuple[str, float, float, int]:
             """Generate tokens and measure timing.
@@ -458,6 +480,8 @@ def benchmark_mlx() -> Optional[Tuple[BenchmarkResult, RooflineResult, AccuracyS
 
             # Use stream context and prefetch step size
             gen_kwargs = {"prompt": prompt, "max_tokens": max_tokens, "prefill_step_size": PREFETCH_STEP_SIZE}
+            if draft_model is not None:
+                gen_kwargs["draft_model"] = draft_model
 
             if stream:
                 with stream:
@@ -524,6 +548,11 @@ def benchmark_mlx() -> Optional[Tuple[BenchmarkResult, RooflineResult, AccuracyS
             tokens_generated=int(avg_tokens),
             memory_mb=mem_after - mem_before,
         )
+
+        # Stop Metal capture if enabled
+        if METAL_CAPTURE:
+            mx.metal.stop_capture()
+            print("  Metal capture saved.")
 
         del model
 
