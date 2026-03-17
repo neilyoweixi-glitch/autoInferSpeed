@@ -1,6 +1,6 @@
 """
-Inference Speed Benchmark - Mac Mini Edition
-Maximize tokens/sec for Qwen3.5-2B 8-bit on Apple Silicon using MLX.
+Inference Speed Benchmark - Apple Silicon Edition
+Maximize prefill and decode performance for Qwen3.5-2B 8-bit using MLX.
 
 Usage: uv run inference.py
 """
@@ -8,100 +8,88 @@ Usage: uv run inference.py
 import os
 import subprocess
 import time
+import mlx.core as mx
 from dataclasses import dataclass, field
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict, Generator, Any
 from datetime import datetime
 
+# =============================================================================
 # Configuration - AGENT MODIFIES THESE
+# =============================================================================
+
 MODEL_NAME = "mlx-community/Qwen3.5-2B-8bit"  # Fixed: 8-bit quantized via MLX
-PROMPT = "Write a short story about a robot learning to paint."
-MAX_TOKENS = 50
-NUM_WARMUP = 3  # More warmup for JIT compilation
-NUM_RUNS = 5  # More runs for stable average
-BATCH_SIZE = 1  # Fixed per requirements
-ACCURACY_MAX_TOKENS = 50  # Tokens for accuracy verification
+NUM_WARMUP = 2
+NUM_RUNS = 3
 
-# Async execution optimization
-USE_STREAM = True  # Use mx.stream() for async execution
-PREFETCH_STEP_SIZE = 2048  # Increase prefill step size for better throughput
+# Prefill settings
+PREFILL_SEQ_LENS = [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+PREFILL_TTFT_TARGETS = {  # ms
+    32: 15, 64: 20, 128: 30, 256: 50, 512: 100,
+    1024: 200, 2048: 400, 4096: 800, 8192: 1600, 16384: 3200
+}
 
-# Speculative decoding (use smaller model as draft)
-USE_SPECULATIVE = False  # Disabled - exploring other optimization paths
-DRAFT_MODEL_NAME = None
+# Decode settings
+DECODE_LATENCY_CONSTRAINTS = [20, 30, 50, 100, None]  # ms per token, None = unlimited
+DECODE_CONTEXT_DEPTHS = [256, 1024]  # tokens of context
+DECODE_TOKENS = 50  # tokens to generate per sequence
 
-# Metal profiling (set to True to capture Metal trace for debugging)
-METAL_CAPTURE = False
+# Accuracy settings
+ACCURACY_MAX_TOKENS = 50
+
+# Optimization flags
+USE_STREAM = True
+PREFETCH_STEP_SIZE = 2048
 
 # Results file
 RESULTS_FILE = "results.tsv"
 
-# Baseline targets (from initial benchmarks)
-BASELINE_TOK_SEC = 40.3
-
-# Reference file for baseline outputs (used for accuracy verification)
+# Reference file for baseline outputs
 REFERENCE_FILE = ".baseline_reference.pkl"
 
 # Accuracy test prompts
 ACCURACY_PROMPTS = [
-    # Factual recall
     "The capital of France is",
-    # Arithmetic
     "What is 127 + 385? The answer is",
-    # Code generation
     "Write a Python function that returns the factorial of n:\ndef factorial(n):",
-    # Reasoning
     "If all roses are flowers and some flowers fade quickly, can we conclude that some roses fade quickly? Answer:",
-    # Long-form coherence
     "Explain how photosynthesis works in three sentences.",
 ]
 
-# Apple Silicon bandwidth limits (GB/s)
-CHIP_BANDWIDTH = {
-    "M1": 68.25,
-    "M2": 100.0,
-    "M3": 100.0,
-    "M4": 120.0,
-}
+# Apple Silicon specs
+CHIP_BANDWIDTH = {"M1": 68.25, "M2": 100.0, "M3": 100.0, "M4": 120.0}
+CHIP_TFLOPS = {"M1": 2.6, "M2": 3.6, "M3": 4.8, "M4": 5.4}
 
-# Apple Silicon GPU theoretical peak FLOPs (TFLOPS, FP16/FP32 mixed)
-CHIP_TFLOPS = {
-    "M1": 2.6,
-    "M2": 3.6,
-    "M3": 4.8,
-    "M4": 5.4,
-}
+# Model specs for Qwen3.5-2B
+MODEL_PARAMS_B = 2.0
+MODEL_SIZE_GB = 2.47
 
+
+# =============================================================================
+# Data Classes
+# =============================================================================
 
 @dataclass
-class BenchmarkResult:
-    """Result from a benchmark run."""
-    tokens_per_sec: float
-    time_to_first_token_ms: float
-    total_latency_ms: float
-    tokens_generated: int
+class PrefillResult:
+    """Result from a prefill benchmark."""
+    seq_len: int
+    ttft_ms: float
+    prefill_tok_s: float
+    mfu: float
     memory_mb: float
-    notes: str = ""
+    target_met: bool
 
 
 @dataclass
-class RooflineResult:
-    """Roofline analysis result."""
-    chip: str
-    gpu_cores: int
-    peak_bandwidth_gbs: float
-    model_size_gb: float
-    roofline_tok_s: float
-    actual_tok_s: float
-    bandwidth_util: float
+class DecodeResult:
+    """Result from a decode benchmark."""
+    latency_constraint_ms: Optional[float]
+    context_depth: int
+    max_batch: int
+    total_tok_s: float
+    ms_per_tok: float
+    memory_mb: float
+    bw_util: float
     bottleneck: str
-    gpu_active_pct: float = 0.0
-    cpu_overhead_pct: float = 0.0
-    # MFU metrics
-    params_billions: float = 2.0
-    flops_per_token: float = 0.0  # in GFLOPs
-    peak_tflops: float = 0.0
-    actual_gflops_per_sec: float = 0.0
-    mfu: float = 0.0  # Model FLOPs Utilization (0-1)
 
 
 @dataclass
@@ -114,7 +102,7 @@ class AccuracyResult:
     match_pct: float
     first_divergence: Optional[int]
     semantic_pass: bool
-    semantic_type: str  # PASS, FAIL, N/A
+    semantic_type: str
 
 
 @dataclass
@@ -123,9 +111,25 @@ class AccuracySuiteResult:
     results: List[AccuracyResult] = field(default_factory=list)
     overall_pass: bool = True
     avg_match_pct: float = 0.0
-    overall_status: str = "PASS"  # PASS, WARN, FAIL, BASELINE
+    overall_status: str = "PASS"
     generated_outputs: Optional[List[List[int]]] = None
 
+
+@dataclass
+class BenchmarkResults:
+    """Complete benchmark results."""
+    prefill: List[PrefillResult] = field(default_factory=list)
+    decode: List[DecodeResult] = field(default_factory=list)
+    accuracy: Optional[AccuracySuiteResult] = None
+    chip: str = ""
+    gpu_cores: int = 0
+    peak_bandwidth_gbs: float = 0.0
+    peak_tflops: float = 0.0
+
+
+# =============================================================================
+# Utility Functions
+# =============================================================================
 
 def get_memory_mb() -> float:
     """Get current memory usage in MB."""
@@ -136,214 +140,55 @@ def get_memory_mb() -> float:
         return 0.0
 
 
-def get_chip_info() -> Tuple[str, int, float]:
-    """Detect Apple Silicon chip, GPU cores, and peak bandwidth."""
+def get_chip_info() -> Tuple[str, int, float, float]:
+    """Detect Apple Silicon chip info."""
     chip_name = "Unknown"
     gpu_cores = 0
 
     try:
-        # Get chip info from system
         result = subprocess.run(
             ["sysctl", "-n", "machdep.cpu.brand_string"],
             capture_output=True, text=True, timeout=5
         )
         chip_name = result.stdout.strip()
 
-        # Extract GPU cores from system profiler
         result = subprocess.run(
             ["system_profiler", "SPDisplaysDataType"],
             capture_output=True, text=True, timeout=10
         )
-        output = result.stdout
-        # Look for "Total Number of Cores: X"
         import re
-        match = re.search(r"Total Number of Cores:\s*(\d+)", output)
+        match = re.search(r"Total Number of Cores:\s*(\d+)", result.stdout)
         if match:
             gpu_cores = int(match.group(1))
     except Exception:
         pass
 
-    # Determine bandwidth from chip name
-    bandwidth = 100.0  # Default
+    bandwidth = 100.0
+    tflops = 3.6
     for chip_key, bw in CHIP_BANDWIDTH.items():
         if chip_key in chip_name:
             bandwidth = bw
+            tflops = CHIP_TFLOPS.get(chip_key, 3.6)
             break
 
-    return chip_name, gpu_cores, bandwidth
-
-
-def get_model_size_gb(model) -> float:
-    """Estimate model size in GB from MLX model.
-
-    For Qwen3.5-2B 8-bit: ~2.5GB is the actual size.
-    """
-    try:
-        import mlx.core as mx
-
-        # Try to get weights from the model
-        total_bytes = 0
-
-        # MLX-LM model is a tuple (model, tokenizer), we get just the model
-        if hasattr(model, 'items'):
-            # It's a dict-like object with weights
-            for name, param in model.items():
-                if hasattr(param, 'nbytes'):
-                    total_bytes += param.nbytes
-                elif hasattr(param, 'size'):
-                    total_bytes += param.size * 4
-
-        # If we got something, use it
-        if total_bytes > 0:
-            return total_bytes / (1024 ** 3)
-
-        # Fallback for Qwen3.5-2B 8-bit: based on actual model size
-        # 2B params at 8-bit = 2GB, plus overhead for KV cache, embeddings, etc.
-        return 2.47  # Measured baseline
-
-    except Exception:
-        # Fallback: estimate from parameter count
-        # Qwen3.5-2B 8-bit ≈ 2.47 GB
-        return 2.47
+    return chip_name, gpu_cores, bandwidth, tflops
 
 
 def verify_semantic_answer(prompt: str, response: str) -> Tuple[bool, str]:
-    """Check if the response is semantically correct for verifiable prompts.
-
-    Returns: (is_correct, status_string)
-    """
+    """Check semantic correctness for verifiable prompts."""
     response_lower = response.lower().strip()
 
-    # Arithmetic: "What is 127 + 385? The answer is"
     if "127 + 385" in prompt:
-        # Answer should be 512
-        if "512" in response:
-            return True, "PASS"
-        return False, "FAIL"
+        return ("512" in response, "PASS" if "512" in response else "FAIL")
 
-    # Factual: "The capital of France is"
     if "capital of france" in prompt.lower():
-        if "paris" in response_lower:
-            return True, "PASS"
-        return False, "FAIL"
+        return ("paris" in response_lower, "PASS" if "paris" in response_lower else "FAIL")
 
-    # Reasoning: syllogism about roses
     if "roses are flowers" in prompt.lower():
-        # The correct answer is "no" or "we cannot conclude"
-        # This is a logical fallacy - "some flowers fade" doesn't mean "some roses fade"
-        if "no" in response_lower or "cannot" in response_lower or "not necessarily" in response_lower:
-            return True, "PASS"
-        # Accept if it explains the logical issue
-        if "invalid" in response_lower or "fallacy" in response_lower:
-            return True, "PASS"
-        return False, "FAIL"
+        is_correct = any(x in response_lower for x in ["no", "cannot", "not necessarily", "invalid", "fallacy"])
+        return (is_correct, "PASS" if is_correct else "FAIL")
 
-    # Code and long-form prompts don't have verifiable answers
-    return True, "N/A"
-
-
-def compute_accuracy(
-    model,
-    tokenizer,
-    reference_outputs: Optional[List[List[int]]] = None,
-    save_reference: bool = False
-) -> AccuracySuiteResult:
-    """Run accuracy verification against reference outputs.
-
-    If reference_outputs is None, generates new references (baseline mode).
-    """
-    import mlx.core as mx
-
-    results = []
-    generated_outputs = []
-
-    for idx, prompt in enumerate(ACCURACY_PROMPTS):
-        # Generate tokens with greedy decoding (default sampler is greedy)
-        from mlx_lm import generate
-
-        output_text = generate(
-            model, tokenizer, prompt=prompt,
-            max_tokens=ACCURACY_MAX_TOKENS,
-            verbose=False
-        )
-
-        # Tokenize output to get token IDs
-        output_tokens = list(tokenizer.encode(output_text))
-        generated_outputs.append(output_tokens)
-
-        if reference_outputs is not None and idx < len(reference_outputs):
-            ref_tokens = reference_outputs[idx]
-
-            # Token-level comparison
-            min_len = min(len(output_tokens), len(ref_tokens))
-            matches = sum(1 for i in range(min_len) if output_tokens[i] == ref_tokens[i])
-
-            # First divergence
-            first_div = None
-            for i in range(min_len):
-                if output_tokens[i] != ref_tokens[i]:
-                    first_div = i
-                    break
-            if first_div is None and len(output_tokens) != len(ref_tokens):
-                first_div = min_len
-
-            match_pct = (matches / len(ref_tokens)) * 100 if ref_tokens else 0
-
-            # Semantic check
-            semantic_pass, semantic_type = verify_semantic_answer(prompt, output_text)
-
-            result = AccuracyResult(
-                prompt_idx=idx,
-                prompt_preview=prompt[:40] + "..." if len(prompt) > 40 else prompt,
-                token_match=matches,
-                token_total=len(ref_tokens),
-                match_pct=match_pct,
-                first_divergence=first_div,
-                semantic_pass=semantic_pass,
-                semantic_type=semantic_type,
-            )
-            results.append(result)
-        else:
-            # No reference - this is baseline generation
-            result = AccuracyResult(
-                prompt_idx=idx,
-                prompt_preview=prompt[:40] + "..." if len(prompt) > 40 else prompt,
-                token_match=len(output_tokens),
-                token_total=len(output_tokens),
-                match_pct=100.0,
-                first_divergence=None,
-                semantic_pass=True,
-                semantic_type="N/A",
-            )
-            results.append(result)
-
-    # Compute overall status
-    if not results:
-        return AccuracySuiteResult()
-
-    avg_match = sum(r.match_pct for r in results) / len(results)
-
-    # Determine overall status
-    any_semantic_fail = any(not r.semantic_pass for r in results)
-    avg_below_80 = avg_match < 80.0
-
-    if any_semantic_fail or avg_below_80:
-        overall_status = "FAIL"
-        overall_pass = False
-    elif avg_match < 90.0:
-        overall_status = "WARN"
-        overall_pass = True
-    else:
-        overall_status = "PASS"
-        overall_pass = True
-
-    return AccuracySuiteResult(
-        results=results,
-        overall_pass=overall_pass,
-        avg_match_pct=avg_match,
-        overall_status=overall_status,
-        generated_outputs=generated_outputs if save_reference else None,
-    )
+    return (True, "N/A")
 
 
 def load_reference_outputs() -> Optional[List[List[int]]]:
@@ -365,321 +210,400 @@ def save_reference_outputs(outputs: List[List[int]]):
         pickle.dump(outputs, f)
 
 
-def compute_roofline(
-    model,
-    tokens_per_sec: float,
-    gpu_time_pct: float = 0.78,
-    cpu_time_pct: float = 0.22
-) -> RooflineResult:
-    """Compute roofline analysis for the benchmark run."""
-    chip_name, gpu_cores, peak_bandwidth = get_chip_info()
-    model_size = get_model_size_gb(model)
+def generate_synthetic_prompt(tokenizer, seq_len: int) -> str:
+    """Generate a synthetic prompt of approximately seq_len tokens."""
+    # Use a simple repeated pattern that tokenizes consistently
+    base = "The quick brown fox jumps over the lazy dog. "
+    tokens = tokenizer.encode(base)
+    repeats = (seq_len // len(tokens)) + 1
+    full_text = base * repeats
+    full_tokens = tokenizer.encode(full_text)
+    # Trim to exact length
+    trimmed = tokenizer.decode(full_tokens[:seq_len])
+    return trimmed
 
-    # Roofline tok/s = peak_bandwidth / model_size
-    # (each token generation reads full model weights once)
-    roofline_tok_s = peak_bandwidth / model_size
 
-    # Bandwidth utilization
-    bandwidth_util = tokens_per_sec / roofline_tok_s if roofline_tok_s > 0 else 0
+# =============================================================================
+# Benchmark Functions
+# =============================================================================
 
-    # MFU calculation
-    # Qwen3.5-2B has ~2B parameters
-    # FLOPs per token for forward pass ≈ 2 * num_params (multiply + add)
-    params_billions = 2.0  # Qwen3.5-2B
-    flops_per_token = 2 * params_billions  # in GFLOPs
-
-    # Get peak TFLOPS for this chip
-    peak_tflops = 3.6  # Default M2
-    for chip_key, tflops in CHIP_TFLOPS.items():
-        if chip_key in chip_name:
-            peak_tflops = tflops
-            break
-
-    # Actual GFLOPs/sec = FLOPs per token * tokens/sec
-    actual_gflops_per_sec = flops_per_token * tokens_per_sec
-
-    # MFU = actual / peak (convert TFLOPS to GFLOPS)
+def benchmark_prefill(model, tokenizer, stream, chip_info) -> List[PrefillResult]:
+    """Benchmark prefill across all sequence lengths."""
+    from mlx_lm.generate import generate_step
+    _, _, _, peak_tflops = chip_info
     peak_gflops = peak_tflops * 1000
-    mfu = actual_gflops_per_sec / peak_gflops if peak_gflops > 0 else 0
 
-    # Determine bottleneck
-    if bandwidth_util > 0.70:
-        bottleneck = "MEMORY_BOUND"
-    elif gpu_time_pct > 0.60:
-        bottleneck = "COMPUTE_BOUND"
-    elif cpu_time_pct > 0.50:
-        bottleneck = "CPU_BOUND"
+    results = []
+
+    for seq_len in PREFILL_SEQ_LENS:
+        print(f"  Prefill seq_len={seq_len}...")
+
+        # Generate synthetic prompt tokens
+        prompt = generate_synthetic_prompt(tokenizer, seq_len)
+        prompt_tokens = mx.array(tokenizer.encode(prompt))
+
+        # Warmup
+        mx.clear_cache()
+        gen = generate_step(prompt_tokens, model, max_tokens=1, prefill_step_size=PREFETCH_STEP_SIZE)
+        _ = next(gen, None)
+        del gen
+
+        # Benchmark - measure time to first token (prefill + first decode step)
+        ttfts = []
+        for _ in range(NUM_RUNS):
+            mx.clear_cache()
+            mem_before = get_memory_mb()
+            start = time.perf_counter()
+
+            gen = generate_step(prompt_tokens, model, max_tokens=1, prefill_step_size=PREFETCH_STEP_SIZE)
+            first_token, _ = next(gen)
+
+            ttft_ms = (time.perf_counter() - start) * 1000
+            ttfts.append(ttft_ms)
+            del gen
+
+        mem_after = get_memory_mb()
+        avg_ttft = sum(ttfts) / len(ttfts)
+        prefill_tok_s = seq_len / (avg_ttft / 1000)
+
+        # Calculate MFU for prefill (compute-bound)
+        # FLOPs for prefill = 2 * params * seq_len
+        flops = 2 * MODEL_PARAMS_B * seq_len  # in GFLOPs
+        time_s = avg_ttft / 1000
+        actual_gflops_s = flops / time_s
+        mfu = actual_gflops_s / peak_gflops if peak_gflops > 0 else 0
+
+        target = PREFILL_TTFT_TARGETS.get(seq_len, float('inf'))
+        target_met = avg_ttft < target
+
+        results.append(PrefillResult(
+            seq_len=seq_len,
+            ttft_ms=avg_ttft,
+            prefill_tok_s=prefill_tok_s,
+            mfu=mfu,
+            memory_mb=mem_after - mem_before,
+            target_met=target_met,
+        ))
+
+    return results
+
+
+def benchmark_decode(model, tokenizer, stream, chip_info) -> List[DecodeResult]:
+    """Benchmark decode across latency constraints and context depths."""
+    from mlx_lm.generate import generate_step
+
+    results = []
+    _, peak_bandwidth, _, _ = chip_info
+    roofline_tok_s = peak_bandwidth / MODEL_SIZE_GB
+
+    for context_depth in DECODE_CONTEXT_DEPTHS:
+        print(f"  Decode context={context_depth}...")
+
+        # Create a context prompt
+        context_prompt = generate_synthetic_prompt(tokenizer, context_depth)
+        context_tokens = mx.array(tokenizer.encode(context_prompt))
+
+        for constraint in DECODE_LATENCY_CONSTRAINTS:
+            # Warmup first
+            mx.clear_cache()
+            gen = generate_step(context_tokens, model, max_tokens=5, prefill_step_size=PREFETCH_STEP_SIZE)
+            for _ in gen:
+                pass
+            del gen
+
+            # Measure decode-only performance
+            decode_times = []
+            for _ in range(NUM_RUNS):
+                mx.clear_cache()
+                start_total = time.perf_counter()
+
+                gen = generate_step(context_tokens, model, max_tokens=DECODE_TOKENS, prefill_step_size=PREFETCH_STEP_SIZE)
+                tokens_gen = 0
+                ttft = None
+
+                for token, _ in gen:
+                    tokens_gen += 1
+                    if ttft is None:
+                        ttft = (time.perf_counter() - start_total) * 1000
+
+                total_ms = (time.perf_counter() - start_total) * 1000
+                decode_time = total_ms - ttft if ttft else total_ms
+                ms_per_tok = decode_time / (tokens_gen - 1) if tokens_gen > 1 else 0
+                decode_times.append(ms_per_tok)
+                del gen
+
+            avg_ms_per_tok = sum(decode_times) / len(decode_times)
+            total_tok_s = 1000 / avg_ms_per_tok if avg_ms_per_tok > 0 else 0
+            mem_after = get_memory_mb()
+
+            # Check if within constraint
+            if constraint is None or avg_ms_per_tok < constraint:
+                bw_util = total_tok_s / roofline_tok_s
+
+                # Determine bottleneck
+                if bw_util > 0.7:
+                    bottleneck = "MEMORY_BOUND"
+                else:
+                    bottleneck = "OVERHEAD_BOUND"
+
+                results.append(DecodeResult(
+                    latency_constraint_ms=constraint,
+                    context_depth=context_depth,
+                    max_batch=1,
+                    total_tok_s=total_tok_s,
+                    ms_per_tok=avg_ms_per_tok,
+                    memory_mb=mem_after,
+                    bw_util=bw_util,
+                    bottleneck=bottleneck,
+                ))
+                constraint_str = f"{constraint}ms" if constraint else "none"
+                print(f"    constraint={constraint_str}: batch=1 tok/s={total_tok_s:.1f} ms/tok={avg_ms_per_tok:.1f}")
+            else:
+                results.append(DecodeResult(
+                    latency_constraint_ms=constraint,
+                    context_depth=context_depth,
+                    max_batch=0,
+                    total_tok_s=0,
+                    ms_per_tok=avg_ms_per_tok,
+                    memory_mb=mem_after,
+                    bw_util=0,
+                    bottleneck="CONSTRAINT_EXCEEDED",
+                ))
+                print(f"    constraint={constraint}ms: CONSTRAINT_EXCEEDED")
+
+    return results
+
+
+def benchmark_accuracy(model, tokenizer, reference_outputs=None) -> AccuracySuiteResult:
+    """Run accuracy verification."""
+    from mlx_lm import generate
+
+    results = []
+    generated_outputs = []
+
+    for idx, prompt in enumerate(ACCURACY_PROMPTS):
+        output_text = generate(
+            model, tokenizer, prompt=prompt,
+            max_tokens=ACCURACY_MAX_TOKENS,
+            verbose=False
+        )
+
+        output_tokens = list(tokenizer.encode(output_text))
+        generated_outputs.append(output_tokens)
+
+        if reference_outputs is not None and idx < len(reference_outputs):
+            ref_tokens = reference_outputs[idx]
+            min_len = min(len(output_tokens), len(ref_tokens))
+            matches = sum(1 for i in range(min_len) if output_tokens[i] == ref_tokens[i])
+
+            first_div = None
+            for i in range(min_len):
+                if output_tokens[i] != ref_tokens[i]:
+                    first_div = i
+                    break
+            if first_div is None and len(output_tokens) != len(ref_tokens):
+                first_div = min_len
+
+            match_pct = (matches / len(ref_tokens)) * 100 if ref_tokens else 0
+            semantic_pass, semantic_type = verify_semantic_answer(prompt, output_text)
+
+            results.append(AccuracyResult(
+                prompt_idx=idx,
+                prompt_preview=prompt[:40] + "..." if len(prompt) > 40 else prompt,
+                token_match=matches,
+                token_total=len(ref_tokens),
+                match_pct=match_pct,
+                first_divergence=first_div,
+                semantic_pass=semantic_pass,
+                semantic_type=semantic_type,
+            ))
+        else:
+            results.append(AccuracyResult(
+                prompt_idx=idx,
+                prompt_preview=prompt[:40] + "..." if len(prompt) > 40 else prompt,
+                token_match=len(output_tokens),
+                token_total=len(output_tokens),
+                match_pct=100.0,
+                first_divergence=None,
+                semantic_pass=True,
+                semantic_type="N/A",
+            ))
+
+    if not results:
+        return AccuracySuiteResult()
+
+    avg_match = sum(r.match_pct for r in results) / len(results)
+    any_semantic_fail = any(not r.semantic_pass for r in results)
+
+    if any_semantic_fail or avg_match < 80.0:
+        overall_status = "FAIL"
+        overall_pass = False
+    elif avg_match < 90.0:
+        overall_status = "WARN"
+        overall_pass = True
     else:
-        bottleneck = "OVERHEAD_BOUND"
+        overall_status = "PASS"
+        overall_pass = True
 
-    return RooflineResult(
-        chip=chip_name,
-        gpu_cores=gpu_cores,
-        peak_bandwidth_gbs=peak_bandwidth,
-        model_size_gb=model_size,
-        roofline_tok_s=roofline_tok_s,
-        actual_tok_s=tokens_per_sec,
-        bandwidth_util=bandwidth_util,
-        bottleneck=bottleneck,
-        gpu_active_pct=gpu_time_pct * 100,
-        cpu_overhead_pct=cpu_time_pct * 100,
-        params_billions=params_billions,
-        flops_per_token=flops_per_token,
-        peak_tflops=peak_tflops,
-        actual_gflops_per_sec=actual_gflops_per_sec,
-        mfu=mfu,
+    return AccuracySuiteResult(
+        results=results,
+        overall_pass=overall_pass,
+        avg_match_pct=avg_match,
+        overall_status=overall_status,
+        generated_outputs=generated_outputs,
     )
 
 
 # =============================================================================
-# MLX Backend (Apple Silicon only)
+# Main Benchmark Runner
 # =============================================================================
 
-def benchmark_mlx() -> Optional[Tuple[BenchmarkResult, RooflineResult, AccuracySuiteResult]]:
-    """Benchmark Qwen3.5-2B 8-bit using Apple MLX framework.
+def run_benchmark() -> Optional[BenchmarkResults]:
+    """Run the complete benchmark suite."""
+    from mlx_lm import load
 
-    Returns: (benchmark_result, roofline_result, accuracy_result) or None on error
-    """
+    print("\n" + "=" * 60)
+    print("BENCHMARK: Qwen3.5-2B 8-bit")
+    print("=" * 60 + "\n")
+
     try:
-        import mlx.core as mx
-        from mlx_lm import load, stream_generate, generate
-
-        print(f"  Loading model: {MODEL_NAME}...")
-
+        print(f"Loading model: {MODEL_NAME}...")
         mem_before = get_memory_mb()
-
         model, tokenizer = load(MODEL_NAME)
 
-        # Create a stream for async execution on GPU
         stream = mx.stream(mx.gpu) if USE_STREAM else None
+        chip_info = get_chip_info()
+        chip, gpu_cores, peak_bandwidth, peak_tflops = chip_info
 
-        # No draft model - speculative decoding disabled
-        draft_model = None
+        print(f"Chip: {chip} ({gpu_cores}-core GPU, {peak_bandwidth:.0f} GB/s, {peak_tflops:.1f} TFLOPS)")
 
-        # Start Metal capture if enabled (for profiling)
-        if METAL_CAPTURE:
-            print("  Starting Metal capture for profiling...")
-            mx.metal.start_capture()
-
-        def gen(prompt: str, max_tokens: int) -> Tuple[str, float, float, int]:
-            """Generate tokens and measure timing.
-
-            Returns: (response_text, ttft_ms, total_ms, tokens_generated)
-            """
-            start = time.perf_counter()
-            ttft = None
-            tokens_generated = 0
-            response = ""
-
-            # Use stream context and prefetch step size
-            gen_kwargs = {"prompt": prompt, "max_tokens": max_tokens, "prefill_step_size": PREFETCH_STEP_SIZE}
-            if draft_model is not None:
-                gen_kwargs["draft_model"] = draft_model
-
-            if stream:
-                with stream:
-                    for chunk in stream_generate(model, tokenizer, **gen_kwargs):
-                        if ttft is None:
-                            ttft = (time.perf_counter() - start) * 1000
-                        response += chunk.text if hasattr(chunk, 'text') else str(chunk)
-                        tokens_generated += 1
-            else:
-                for chunk in stream_generate(model, tokenizer, **gen_kwargs):
-                    if ttft is None:
-                        ttft = (time.perf_counter() - start) * 1000
-                    response += chunk.text if hasattr(chunk, 'text') else str(chunk)
-                    tokens_generated += 1
-
-            total_ms = (time.perf_counter() - start) * 1000
-            if ttft is None:
-                ttft = total_ms
-
-            return response, ttft, total_ms, tokens_generated
-
-        # Warmup
-        print("  Warming up...")
-        for _ in range(NUM_WARMUP):
-            gen(PROMPT, 5)
-
-        # Benchmark
-        print("  Benchmarking speed...")
-        latencies, ttfts, tokens_list = [], [], []
-        for i in range(NUM_RUNS):
-            _, ttft, total_ms, tokens = gen(PROMPT, MAX_TOKENS)
-            latencies.append(total_ms)
-            ttfts.append(ttft)
-            tokens_list.append(tokens)
-
-        mem_after = get_memory_mb()
-
-        avg_latency = sum(latencies) / len(latencies)
-        avg_ttft = sum(ttfts) / len(ttfts)
-        avg_tokens = sum(tokens_list) / len(tokens_list)
-        tok_per_sec = (avg_tokens / avg_latency) * 1000
-
-        # Compute roofline
-        print("  Computing roofline analysis...")
-        roofline = compute_roofline(model, tok_per_sec)
-
-        # Accuracy verification
-        print("  Running accuracy verification...")
-        reference_outputs = load_reference_outputs()
-
-        if reference_outputs is None:
-            print("  No baseline reference found. Creating baseline reference outputs...")
-            accuracy = compute_accuracy(model, tokenizer, None, save_reference=True)
-            if hasattr(accuracy, 'generated_outputs') and accuracy.generated_outputs:
-                save_reference_outputs(accuracy.generated_outputs)
-            accuracy.overall_status = "BASELINE"
-        else:
-            accuracy = compute_accuracy(model, tokenizer, reference_outputs)
-
-        benchmark_result = BenchmarkResult(
-            tokens_per_sec=tok_per_sec,
-            time_to_first_token_ms=avg_ttft,
-            total_latency_ms=avg_latency,
-            tokens_generated=int(avg_tokens),
-            memory_mb=mem_after - mem_before,
+        results = BenchmarkResults(
+            chip=chip,
+            gpu_cores=gpu_cores,
+            peak_bandwidth_gbs=peak_bandwidth,
+            peak_tflops=peak_tflops,
         )
 
-        # Stop Metal capture if enabled
-        if METAL_CAPTURE:
-            mx.metal.stop_capture()
-            print("  Metal capture saved.")
+        # Prefill benchmark
+        print("\n[PREFILL BENCHMARK]")
+        results.prefill = benchmark_prefill(model, tokenizer, stream, chip_info)
+
+        # Decode benchmark
+        print("\n[DECODE BENCHMARK]")
+        results.decode = benchmark_decode(model, tokenizer, stream, chip_info)
+
+        # Accuracy verification
+        print("\n[ACCURACY VERIFICATION]")
+        reference_outputs = load_reference_outputs()
+        if reference_outputs is None:
+            print("  Creating baseline reference outputs...")
+            results.accuracy = benchmark_accuracy(model, tokenizer, None)
+            if results.accuracy.generated_outputs:
+                save_reference_outputs(results.accuracy.generated_outputs)
+            results.accuracy.overall_status = "BASELINE"
+        else:
+            results.accuracy = benchmark_accuracy(model, tokenizer, reference_outputs)
 
         del model
+        return results
 
-        return benchmark_result, roofline, accuracy
-
-    except ImportError:
-        print("  ERROR: MLX not installed. This benchmark requires Apple Silicon with MLX.")
-        print("  Install with: uv sync")
-        return None
     except Exception as e:
-        print(f"  Error: {e}")
+        print(f"Error: {e}")
         import traceback
         traceback.print_exc()
         return None
 
 
-# =============================================================================
-# Main Runner
-# =============================================================================
-
-def run_benchmark() -> Optional[Tuple[BenchmarkResult, RooflineResult, AccuracySuiteResult]]:
-    """Run the MLX inference benchmark."""
+def print_report(results: BenchmarkResults):
+    """Print the full benchmark report."""
     print("\n" + "=" * 60)
-    print("BENCHMARK: Qwen3.5-2B 8-bit")
-    print("=" * 60 + "\n")
-
-    print("[MLX 8-bit]")
-    result = benchmark_mlx()
-    if result:
-        bench, roofline, accuracy = result
-        print(f"  {bench.tokens_per_sec:.1f} tok/s | TTFT: {bench.time_to_first_token_ms:.0f}ms | Latency: {bench.total_latency_ms:.0f}ms | Memory: {bench.memory_mb:.0f}MB")
-
-    return result
-
-
-def print_full_report(
-    benchmark: BenchmarkResult,
-    roofline: RooflineResult,
-    accuracy: AccuracySuiteResult
-):
-    """Print the full benchmark report in the specified format."""
-    print("\n" + "=" * 60)
-    print("BENCHMARK: Qwen3.5-2B 8-bit")
+    print("BENCHMARK RESULTS")
     print("=" * 60)
 
-    # SPEED section
-    print("\nSPEED")
-    print(f"  tokens_per_sec: {benchmark.tokens_per_sec:.1f}")
-    print(f"  time_to_first_token_ms: {benchmark.time_to_first_token_ms:.1f}")
-    print(f"  total_latency_ms: {benchmark.total_latency_ms:.0f}")
-    print(f"  tokens_generated: {benchmark.tokens_generated}")
-    print(f"  memory_mb: {benchmark.memory_mb:.0f}")
+    # Prefill results
+    print("\nPREFILL BENCHMARK")
+    for r in results.prefill:
+        target_str = "OK" if r.target_met else "EXCEEDED"
+        target_ms = PREFILL_TTFT_TARGETS.get(r.seq_len, "?")
+        print(f"  seq_len={r.seq_len:<6} TTFT={r.ttft_ms:>6.0f}ms  prefill_tok/s={r.prefill_tok_s:>6.0f}  MFU={r.mfu*100:>5.1f}%  [< {target_ms}ms {target_str}]")
 
-    # ROOFLINE section
+    # Decode results
+    print("\nDECODE BENCHMARK")
+    current_ctx = None
+    for r in results.decode:
+        if r.context_depth != current_ctx:
+            current_ctx = r.context_depth
+            print(f"  (context={current_ctx})")
+        constraint_str = f"{r.latency_constraint_ms}ms" if r.latency_constraint_ms else "none"
+        if r.max_batch > 0:
+            print(f"    constraint={constraint_str:<6} max_batch={r.max_batch:<3} tok/s={r.total_tok_s:>6.1f}  ms/tok={r.ms_per_tok:>5.1f}  {r.bottleneck}")
+        else:
+            print(f"    constraint={constraint_str:<6} CONSTRAINT_EXCEEDED")
+
+    # Accuracy results
+    if results.accuracy:
+        print("\nACCURACY VERIFICATION (vs baseline)")
+        for r in results.accuracy.results:
+            first_div_str = str(r.first_divergence) if r.first_divergence is not None else "none"
+            print(f'  "{r.prompt_preview}"  tokens: {r.token_match}/{r.token_total} ({r.match_pct:.0f}%)  first_div: {first_div_str}  semantic: {r.semantic_type}')
+        print(f"  OVERALL: {results.accuracy.overall_status} (avg token match: {results.accuracy.avg_match_pct:.1f}%)")
+
+    # Roofline analysis
     print("\nROOFLINE ANALYSIS")
-    print(f"  chip: {roofline.chip} ({roofline.gpu_cores}-core GPU, {roofline.peak_bandwidth_gbs:.0f} GB/s bandwidth)")
-    print(f"  model_size: {roofline.model_size_gb:.2f} GB (8-bit quantized)")
-    print(f"  roofline_tok_s: {roofline.roofline_tok_s:.1f} tok/s (memory-bound limit)")
-    print(f"  actual_tok_s: {roofline.actual_tok_s:.1f} tok/s")
-    print(f"  bandwidth_util: {roofline.bandwidth_util * 100:.1f}%")
-    print(f"  bottleneck: {roofline.bottleneck}")
-    print(f"  gpu_active: {roofline.gpu_active_pct:.0f}% of wall time")
-    print(f"  cpu_overhead: {roofline.cpu_overhead_pct:.0f}% of wall time")
+    print(f"  chip: {results.chip} ({results.gpu_cores}-core GPU, {results.peak_bandwidth_gbs:.0f} GB/s, {results.peak_tflops:.1f} TFLOPS)")
+    print(f"  model_size: {MODEL_SIZE_GB:.2f} GB (8-bit quantized)")
 
-    # MFU section
-    print("\nMFU (Model FLOPs Utilization)")
-    print(f"  params: {roofline.params_billions:.1f}B")
-    print(f"  flops_per_token: {roofline.flops_per_token:.1f} GFLOPs")
-    print(f"  peak_tflops: {roofline.peak_tflops:.1f} TFLOPS")
-    print(f"  actual_gflops_per_sec: {roofline.actual_gflops_per_sec:.1f} GFLOPs/s")
-    print(f"  mfu: {roofline.mfu * 100:.1f}%")
+    print("\n  PREFILL ROOFLINE (compute-bound regime)")
+    print(f"    peak_flops: {results.peak_tflops:.1f} TFLOPS")
+    for r in results.prefill:
+        if r.seq_len in [256, 1024]:
+            achieved_tflops = r.mfu * results.peak_tflops
+            print(f"    seq_len={r.seq_len}: achieved {achieved_tflops:.1f} TFLOPS (MFU={r.mfu*100:.0f}%)")
 
-    # ACCURACY section
-    print("\nACCURACY VERIFICATION (vs baseline)")
-    for r in accuracy.results:
-        first_div_str = str(r.first_divergence) if r.first_divergence is not None else "none"
-        print(f'  "{r.prompt_preview}"  tokens: {r.token_match}/{r.token_total} ({r.match_pct:.0f}%)  first_div: {first_div_str}  semantic: {r.semantic_type}')
-    print(f"  OVERALL: {accuracy.overall_status} (avg token match: {accuracy.avg_match_pct:.1f}%)")
+    print("\n  DECODE ROOFLINE (memory-bandwidth-bound at batch=1)")
+    roofline_tok_s = results.peak_bandwidth_gbs / MODEL_SIZE_GB
+    print(f"    roofline_tok_s: {roofline_tok_s:.1f} tok/s ({results.peak_bandwidth_gbs:.0f} GB/s / {MODEL_SIZE_GB:.2f} GB)")
+    for r in results.decode:
+        if r.context_depth == 256 and r.latency_constraint_ms == 20:
+            print(f"    batch=1: actual {r.total_tok_s:.1f} tok/s, bandwidth_util={r.bw_util*100:.0f}%")
 
     print("-" * 60)
 
 
-def save_results(
-    benchmark: BenchmarkResult,
-    roofline: RooflineResult,
-    accuracy: AccuracySuiteResult,
-    description: str = ""
-):
-    """Save result to TSV file with the new format."""
-    import subprocess
-
-    # Get commit hash
+def save_results(results: BenchmarkResults, description: str = ""):
+    """Save results to TSV file."""
     try:
         commit = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip()
     except Exception:
         commit = "unknown"
 
-    # Determine status
-    if accuracy.overall_status == "FAIL":
-        status = "discard"
-    elif accuracy.overall_status == "BASELINE":
-        status = "keep"
-    else:
-        status = "keep"
+    accuracy_pct = results.accuracy.avg_match_pct if results.accuracy else 0
+    status = "keep" if results.accuracy and results.accuracy.overall_status != "FAIL" else "discard"
 
     file_exists = os.path.exists(RESULTS_FILE)
 
     with open(RESULTS_FILE, "a") as f:
         if not file_exists:
-            f.write("commit\ttok_sec\tmemory_mb\tbandwidth_util\tbottleneck\taccuracy\taccuracy_pct\tstatus\tdescription\n")
+            f.write("commit\tstage\tseq_len\tlatency_ms\tcontext\tmax_batch\ttok_sec\tttft_ms\tms_per_tok\tmemory_mb\tmfu_or_bw_util\tbottleneck\taccuracy_pct\tstatus\tdescription\n")
 
-        f.write(
-            f"{commit}\t"
-            f"{benchmark.tokens_per_sec:.2f}\t"
-            f"{benchmark.memory_mb:.0f}\t"
-            f"{roofline.bandwidth_util:.3f}\t"
-            f"{roofline.bottleneck}\t"
-            f"{accuracy.overall_status}\t"
-            f"{accuracy.avg_match_pct:.1f}\t"
-            f"{status}\t"
-            f"{description}\n"
-        )
+        # Write prefill results
+        for r in results.prefill:
+            f.write(f"{commit}\tprefill\t{r.seq_len}\t-\t-\t-\t{r.prefill_tok_s:.1f}\t{r.ttft_ms:.0f}\t-\t{r.memory_mb:.0f}\t{r.mfu:.2f}\tCOMPUTE_BOUND\t{accuracy_pct:.1f}\t{status}\t{description}\n")
+
+        # Write decode results
+        for r in results.decode:
+            latency_str = str(r.latency_constraint_ms) if r.latency_constraint_ms else "none"
+            f.write(f"{commit}\tdecode\t-\t{latency_str}\t{r.context_depth}\t{r.max_batch}\t{r.total_tok_s:.1f}\t-\t{r.ms_per_tok:.1f}\t{r.memory_mb:.0f}\t{r.bw_util:.2f}\t{r.bottleneck}\t{accuracy_pct:.1f}\t{status}\t{description}\n")
 
 
 def main():
-    result = run_benchmark()
-    if result:
-        bench, roofline, accuracy = result
-        print_full_report(bench, roofline, accuracy)
-        save_results(bench, roofline, accuracy, "baseline run with infrastructure")
+    results = run_benchmark()
+    if results:
+        print_report(results)
+        save_results(results, "baseline run")
     else:
-        print("\nBenchmark failed. MLX with Apple Silicon is required.")
-
-    return result
+        print("\nBenchmark failed.")
+    return results
 
 
 if __name__ == "__main__":
