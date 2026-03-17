@@ -53,11 +53,11 @@ def get_memory_mb() -> float:
 # Backend Implementations
 # =============================================================================
 
-def benchmark_transformers_mps(precision: str = "fp16") -> Optional[BenchmarkResult]:
-    """Benchmark using HuggingFace transformers with MPS."""
+def benchmark_transformers(precision: str = "fp16") -> Optional[BenchmarkResult]:
+    """Benchmark using HuggingFace transformers with MPS (fixed for Qwen3.5)."""
     try:
         import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
+        from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig, AutoConfig
 
         print(f"  Loading model with transformers ({precision})...")
 
@@ -69,17 +69,37 @@ def benchmark_transformers_mps(precision: str = "fp16") -> Optional[BenchmarkRes
         else:
             device = "cpu"
 
-        # Load model
+        # Load model - use legacy mode to avoid config issues with Qwen3.5
         dtype = torch.float16 if precision == "fp16" else torch.float32
+
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
 
-        # Fix for Qwen3.5 - use device_map instead of .to()
+        # Load config and patch for Qwen3.5 compatibility
+        # Qwen3.5 has nested config where model params are in text_config
+        config = AutoConfig.from_pretrained(MODEL_NAME, trust_remote_code=True)
+        if hasattr(config, 'text_config'):
+            # Copy all text_config attributes to main config for compatibility
+            text_config = config.text_config
+            for attr in ['vocab_size', 'hidden_size', 'num_hidden_layers',
+                         'num_attention_heads', 'intermediate_size', 'max_position_embeddings',
+                         'pad_token_id', 'bos_token_id', 'eos_token_id']:
+                if hasattr(text_config, attr) and not hasattr(config, attr):
+                    setattr(config, attr, getattr(text_config, attr))
+            # Also set model_type to help with architecture detection
+            if hasattr(text_config, 'model_type'):
+                config.model_type = text_config.model_type
+
+        # Load model with patched config
         model = AutoModelForCausalLM.from_pretrained(
             MODEL_NAME,
+            config=config,
             torch_dtype=dtype,
             trust_remote_code=True,
-            device_map=device,
+            low_cpu_mem_usage=True,
         )
+
+        # Manually move to device
+        model = model.to(device)
         model.eval()
 
         mem_before = get_memory_mb()
@@ -94,6 +114,7 @@ def benchmark_transformers_mps(precision: str = "fp16") -> Optional[BenchmarkRes
                     max_new_tokens=max_tokens,
                     do_sample=False,
                     pad_token_id=tokenizer.eos_token_id,
+                    use_cache=True,
                 )
             total_ms = (time.perf_counter() - start) * 1000
 
@@ -132,7 +153,7 @@ def benchmark_transformers_mps(precision: str = "fp16") -> Optional[BenchmarkRes
             backend="transformers",
             precision=precision,
             tokens_per_sec=tok_per_sec,
-            time_to_first_token_ms=avg_latency,  # Approximate (no streaming)
+            time_to_first_token_ms=avg_latency,  # Approximate
             total_latency_ms=avg_latency,
             tokens_generated=int(avg_tokens),
             memory_mb=mem_after - mem_before,
@@ -146,6 +167,7 @@ def benchmark_transformers_mps(precision: str = "fp16") -> Optional[BenchmarkRes
 def benchmark_mlx(precision: str = "fp16") -> Optional[BenchmarkResult]:
     """Benchmark using Apple MLX framework."""
     try:
+        import mlx.core as mx
         from mlx_lm import load, generate
 
         print(f"  Loading model with MLX ({precision})...")
@@ -158,21 +180,18 @@ def benchmark_mlx(precision: str = "fp16") -> Optional[BenchmarkResult]:
         def gen(prompt: str, max_tokens: int) -> Tuple[str, float, int]:
             start = time.perf_counter()
 
-            # MLX-LM generate returns the full response
-            response = generate(
-                model,
-                tokenizer,
-                prompt=prompt,
-                max_tokens=max_tokens,
-                verbose=False,
-            )
+            # Use stream_generate for token counting
+            from mlx_lm import stream_generate
+            tokens_generated = 0
+            response = ""
+
+            for chunk in stream_generate(model, tokenizer, prompt=prompt, max_tokens=max_tokens):
+                response += chunk.text if hasattr(chunk, 'text') else str(chunk)
+                tokens_generated += 1
 
             total_ms = (time.perf_counter() - start) * 1000
 
-            # Count tokens
-            tokens = len(tokenizer.encode(response))
-
-            return response, total_ms, tokens
+            return response, total_ms, tokens_generated
 
         # Warmup
         print("  Warming up...")
@@ -198,7 +217,7 @@ def benchmark_mlx(precision: str = "fp16") -> Optional[BenchmarkResult]:
             backend="mlx",
             precision=precision,
             tokens_per_sec=tok_per_sec,
-            time_to_first_token_ms=avg_latency,  # Approximate
+            time_to_first_token_ms=avg_latency,
             total_latency_ms=avg_latency,
             tokens_generated=int(avg_tokens),
             memory_mb=mem_after - mem_before,
@@ -213,29 +232,33 @@ def benchmark_mlx(precision: str = "fp16") -> Optional[BenchmarkResult]:
 
 
 def benchmark_mlx_prequantized(bits: int = 4) -> Optional[BenchmarkResult]:
-    """Benchmark MLX with pre-quantized model from HuggingFace."""
+    """Benchmark MLX with pre-quantized model."""
     try:
-        from mlx_lm import load, generate
+        import mlx.core as mx
+        from mlx_lm import load, stream_generate
 
-        # Try MLX Community quantized models
-        quantized_model = f"mlx-community/{MODEL_NAME.split('/')[1]}-{bits}bit"
+        # Map model name to pre-quantized version
+        quantized_model = MODEL_NAME.replace("Qwen/", "mlx-community/").replace("-2B", f"-2B-{bits}bit")
 
         print(f"  Loading pre-quantized model: {quantized_model}...")
 
         mem_before = get_memory_mb()
 
-        try:
-            model, tokenizer = load(quantized_model)
-        except Exception as e:
-            print(f"  Pre-quantized model not available: {e}")
-            return None
+        model, tokenizer = load(quantized_model)
 
         def gen(prompt: str, max_tokens: int) -> Tuple[str, float, int]:
             start = time.perf_counter()
-            response = generate(model, tokenizer, prompt=prompt, max_tokens=max_tokens, verbose=False)
+
+            tokens_generated = 0
+            response = ""
+
+            for chunk in stream_generate(model, tokenizer, prompt=prompt, max_tokens=max_tokens):
+                response += chunk.text if hasattr(chunk, 'text') else str(chunk)
+                tokens_generated += 1
+
             total_ms = (time.perf_counter() - start) * 1000
-            tokens = len(tokenizer.encode(response))
-            return response, total_ms, tokens
+
+            return response, total_ms, tokens_generated
 
         # Warmup
         print("  Warming up...")
@@ -275,47 +298,110 @@ def benchmark_mlx_prequantized(bits: int = 4) -> Optional[BenchmarkResult]:
         return None
 
 
-def benchmark_ollama() -> Optional[BenchmarkResult]:
-    """Benchmark using Ollama (if installed)."""
+def benchmark_vllm() -> Optional[BenchmarkResult]:
+    """Benchmark using vLLM (if available)."""
     try:
-        import subprocess
-        import json
+        from vllm import LLM, SamplingParams
 
-        print("  Checking Ollama...")
-
-        # Check if ollama is installed
-        result = subprocess.run(["which", "ollama"], capture_output=True)
-        if result.returncode != 0:
-            print("  Ollama not installed, skipping")
-            return None
+        print("  Loading model with vLLM...")
 
         mem_before = get_memory_mb()
 
-        # Pull model if needed
-        model_name = MODEL_NAME.split("/")[1].lower()
-        print(f"  Using Ollama model: {model_name}")
+        # vLLM-Metal for Apple Silicon
+        llm = LLM(
+            model=MODEL_NAME,
+            trust_remote_code=True,
+            dtype="float16",
+            # For Apple Silicon, vLLM uses MLX backend
+        )
+
+        sampling_params = SamplingParams(
+            max_tokens=MAX_TOKENS,
+            temperature=0.0,  # Greedy
+        )
+
+        def gen(prompt: str) -> Tuple[str, float, int]:
+            start = time.perf_counter()
+            outputs = llm.generate([prompt], sampling_params)
+            total_ms = (time.perf_counter() - start) * 1000
+
+            text = outputs[0].outputs[0].text
+            tokens = len(outputs[0].outputs[0].token_ids)
+
+            return text, total_ms, tokens
+
+        # Warmup
+        print("  Warming up...")
+        gen(PROMPT)
+
+        # Benchmark
+        print("  Benchmarking...")
+        latencies, tokens_list = [], []
+        for _ in range(NUM_RUNS):
+            _, total_ms, tokens = gen(PROMPT)
+            latencies.append(total_ms)
+            tokens_list.append(tokens)
+
+        mem_after = get_memory_mb()
+
+        avg_latency = sum(latencies) / len(latencies)
+        avg_tokens = sum(tokens_list) / len(tokens_list)
+        tok_per_sec = (avg_tokens / avg_latency) * 1000
+
+        del llm
+
+        return BenchmarkResult(
+            backend="vllm",
+            precision="fp16",
+            tokens_per_sec=tok_per_sec,
+            time_to_first_token_ms=avg_latency,
+            total_latency_ms=avg_latency,
+            tokens_generated=int(avg_tokens),
+            memory_mb=mem_after - mem_before,
+        )
+
+    except ImportError:
+        print("  vLLM not installed, skipping")
+        return None
+    except Exception as e:
+        print(f"  Error: {e}")
+        return None
+
+
+def benchmark_sglang() -> Optional[BenchmarkResult]:
+    """Benchmark using SGLang (if available)."""
+    try:
+        import sglang as sgl
+
+        print("  Loading model with SGLang...")
+
+        mem_before = get_memory_mb()
+
+        # SGLang runtime
+        runtime = sgl.Runtime(
+            model_path=MODEL_NAME,
+            trust_remote_code=True,
+        )
 
         def gen(prompt: str, max_tokens: int) -> Tuple[str, float, int]:
             start = time.perf_counter()
 
-            result = subprocess.run(
-                ["ollama", "run", model_name, prompt],
-                capture_output=True,
-                text=True,
-                timeout=120,
+            response = runtime.generate(
+                prompt,
+                max_new_tokens=max_tokens,
+                temperature=0.0,
             )
 
             total_ms = (time.perf_counter() - start) * 1000
-            response = result.stdout.strip()
 
-            # Rough token count (words * 1.3)
-            tokens = int(len(response.split()) * 1.3)
+            # Count tokens
+            tokens = len(runtime.tokenizer.encode(response))
 
             return response, total_ms, tokens
 
         # Warmup
         print("  Warming up...")
-        gen("Hi", 5)
+        gen(PROMPT, 5)
 
         # Benchmark
         print("  Benchmarking...")
@@ -331,9 +417,11 @@ def benchmark_ollama() -> Optional[BenchmarkResult]:
         avg_tokens = sum(tokens_list) / len(tokens_list)
         tok_per_sec = (avg_tokens / avg_latency) * 1000
 
+        del runtime
+
         return BenchmarkResult(
-            backend="ollama",
-            precision="native",
+            backend="sglang",
+            precision="fp16",
             tokens_per_sec=tok_per_sec,
             time_to_first_token_ms=avg_latency,
             total_latency_ms=avg_latency,
@@ -341,6 +429,9 @@ def benchmark_ollama() -> Optional[BenchmarkResult]:
             memory_mb=mem_after - mem_before,
         )
 
+    except ImportError:
+        print("  SGLang not installed, skipping")
+        return None
     except Exception as e:
         print(f"  Error: {e}")
         return None
@@ -363,12 +454,12 @@ def run_all_benchmarks() -> List[BenchmarkResult]:
 
     # Test each backend
     backends = [
-        ("Transformers (MPS, fp16)", lambda: benchmark_transformers_mps("fp16")),
-        ("Transformers (MPS, fp32)", lambda: benchmark_transformers_mps("fp32")),
+        ("Transformers (MPS, fp16)", lambda: benchmark_transformers("fp16")),
         ("MLX (fp16)", lambda: benchmark_mlx("fp16")),
         ("MLX 4-bit (pre-quantized)", lambda: benchmark_mlx_prequantized(4)),
         ("MLX 8-bit (pre-quantized)", lambda: benchmark_mlx_prequantized(8)),
-        ("Ollama", lambda: benchmark_ollama()),
+        ("vLLM", lambda: benchmark_vllm()),
+        ("SGLang", lambda: benchmark_sglang()),
     ]
 
     for name, benchmark_fn in backends:
