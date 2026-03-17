@@ -14,6 +14,17 @@ Autonomous inference optimization for **Qwen3.5-2B 8-bit** on Apple Silicon.
 - **Roofline**: Every run reports bandwidth utilization and bottleneck type.
 - **Results log**: `results.tsv` (untracked by git).
 
+## Baseline Results (March 2026)
+
+| Backend | Precision | tok/s | Latency | Memory |
+|---------|-----------|-------|---------|--------|
+| **MLX 4-bit** | 4bit | **67.4** | 741ms | 2.5GB |
+| MLX 8-bit | 8bit | 40.3 | 1241ms | 0.9GB |
+| MLX fp16 | fp16 | 22.7 | 2198ms | 3.7GB |
+| Transformers | fp16 | 13.7 | 3653ms | - |
+
+**Best: MLX 4-bit at 67.4 tok/s (125% above baseline)**
+
 ## Files
 
 ```
@@ -30,6 +41,14 @@ CLAUDE.md       — this file
 ```bash
 uv run benchmark.py
 ```
+
+## Known Issues
+
+1. **Transformers + Qwen3.5**: Qwen3.5 uses a nested `text_config` structure that current transformers versions don't fully support. The model loads but generation fails with config attribute errors.
+
+2. **vLLM**: Requires specific torch versions not compatible with current Mac setup. vLLM-Metal plugin is available but experimental.
+
+3. **SGLang**: Apple Silicon support is in development (MLX backend planned for 2026 Q1).
 
 ## Current baseline
 
