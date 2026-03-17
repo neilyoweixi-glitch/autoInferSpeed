@@ -8,11 +8,11 @@ Inspired by [autoresearch](https://github.com/karpathy/autoresearch), but instea
 
 The repo has three files that matter:
 
-- **`benchmark.py`** — the single file the agent edits. Contains the inference harness, accuracy verification suite, and roofline analysis. **This file is edited and iterated on by the agent**.
+- **`inference.py`** — the single file the agent edits. MLX-only inference harness with accuracy verification and roofline analysis. **This file is edited and iterated on by the agent**.
 - **`program.md`** — instructions for the autonomous agent. Point your agent here and let it go. **This file is edited and iterated on by the human**.
 - **`results.tsv`** — experiment log. Tab-separated results from all benchmark runs, including speed, accuracy, and roofline metrics.
 
-The agent modifies `benchmark.py`, runs the benchmark, checks that outputs are still correct, measures how close to the hardware roofline it is, logs results, keeps improvements, discards regressions, and repeats.
+The agent modifies `inference.py`, runs the benchmark, checks that outputs are still correct, measures how close to the hardware roofline it is, logs results, keeps improvements, discards regressions, and repeats.
 
 ## Key principles
 
@@ -33,7 +33,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync
 
 # 3. Run a single benchmark manually
-uv run benchmark.py
+uv run inference.py
 ```
 
 If the above works, your setup is ready for autonomous mode.
@@ -49,7 +49,7 @@ Hi, have a look at program.md and let's kick off inference optimization! Let's d
 ## Project structure
 
 ```
-benchmark.py    — inference harness + accuracy verification + roofline analysis (agent modifies this)
+inference.py    — inference harness + accuracy verification + roofline analysis (agent modifies this)
 program.md      — autonomous agent protocol
 results.tsv     — experiment log (untracked by git)
 pyproject.toml  — dependencies

@@ -4,7 +4,8 @@ This is an experiment to have the LLM autonomously maximize inference speed for 
 
 ## Fixed constraints
 
-- **Model**: Qwen3.5-2B 8-bit quantized (`mlx-community/Qwen3.5-2B-8bit` or equivalent). Do not switch models. All optimizations must target this exact model.
+- **Model**: Qwen3.5-2B 8-bit quantized (`mlx-community/Qwen3.5-2B-8bit`). Do not switch models. All optimizations must target this exact model.
+- **Backend**: MLX only. Apple Silicon native. No Transformers, vLLM, SGLang, or Ollama.
 - **Batch size**: Always 1. Single-request interactive inference.
 - **Correctness**: Every optimization must pass the accuracy verification suite. Speed without correctness is worthless.
 
@@ -16,10 +17,10 @@ To set up a new experiment, work with the user to:
 2. **Create the branch**: `git checkout -b autoinfer/<tag>` from current main.
 3. **Read the in-scope files**: The repo is small. Read these files for full context:
    - `README.md` — repository context.
-   - `benchmark.py` — the file you modify. Backend implementations, benchmark harness, accuracy verification, and configuration.
+   - `inference.py` — the file you modify. Backend implementations, benchmark harness, accuracy verification, and configuration.
    - `pyproject.toml` — dependencies. Do not add new packages.
-4. **Verify dependencies**: Run `uv sync` if needed. Check that `uv run python -c "import torch; print(torch.backends.mps.is_available())"` returns True.
-5. **Establish the baseline**: Run `benchmark.py` unmodified to record the baseline. This first run serves two purposes:
+4. **Verify dependencies**: Run `uv sync` if needed. Check that `uv run python -c "import mlx.core as mx; print(mx.metal.is_available())"` returns True.
+5. **Establish the baseline**: Run `inference.py` unmodified to record the baseline. This first run serves two purposes:
    - Records baseline tok/s for Qwen3.5-2B 8-bit.
    - Captures **baseline reference outputs** — the exact token sequences the unmodified model produces for each test prompt. All future optimizations are compared against these reference outputs for correctness.
 6. **Initialize results.tsv**: Create `results.tsv` with the header row. The baseline will be the first data row.
@@ -84,10 +85,10 @@ OVERALL: PASS (avg token match: 96.0%)
 
 ## Experimentation scope
 
-Each experiment runs on Apple Silicon. You launch it simply as: `uv run benchmark.py`.
+Each experiment runs on Apple Silicon. You launch it simply as: `uv run inference.py`.
 
 **What you CAN do:**
-- Modify `benchmark.py` — this is the only file you edit. You may also create new `.py` files if you need custom Metal kernels or helper modules, but `benchmark.py` remains the entry point.
+- Modify `inference.py` — this is the only file you edit. You may also create new `.py` files if you need custom Metal kernels or helper modules, but `inference.py` remains the entry point.
 
 **What you CANNOT do:**
 - Install new packages or add dependencies beyond what's in `pyproject.toml`. Use `uv sync` to install, never `pip`.
@@ -251,9 +252,9 @@ LOOP FOREVER:
 1. Look at the git state: the current branch/commit we're on.
 2. Check the roofline analysis from the last run to identify the current bottleneck.
 3. Choose an optimization that targets the identified bottleneck. Don't optimize memory bandwidth if you're overhead-bound.
-4. Modify `benchmark.py` (and optionally create kernel files) with the optimization.
+4. Modify `inference.py` (and optionally create kernel files) with the optimization.
 5. `git commit` the change.
-6. Run the experiment: `uv run benchmark.py > run.log 2>&1` (redirect everything — do NOT let output flood your context).
+6. Run the experiment: `uv run inference.py > run.log 2>&1` (redirect everything — do NOT let output flood your context).
 7. Read out the results: `grep "tok_sec\|bandwidth_util\|bottleneck\|OVERALL\|Error" run.log` or `tail -n 30 run.log`.
 8. **Check accuracy first**: If accuracy is FAIL, the optimization is immediately rejected — discard and revert. Do not try to "fix" a broken optimization by loosening accuracy criteria.
 9. If the output shows errors or no results, the run crashed. Run `tail -n 50 run.log` to read the stack trace and attempt a fix.
