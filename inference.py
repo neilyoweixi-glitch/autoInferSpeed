@@ -21,6 +21,10 @@ NUM_RUNS = 3
 BATCH_SIZE = 1  # Fixed per requirements
 ACCURACY_MAX_TOKENS = 50  # Tokens for accuracy verification
 
+# Async execution optimization
+USE_STREAM = True  # Use mx.stream() for async execution
+PREFETCH_STEP_SIZE = 2048  # Increase prefill step size for better throughput
+
 # Results file
 RESULTS_FILE = "results.tsv"
 
@@ -439,6 +443,9 @@ def benchmark_mlx() -> Optional[Tuple[BenchmarkResult, RooflineResult, AccuracyS
 
         model, tokenizer = load(MODEL_NAME)
 
+        # Create a stream for async execution on GPU
+        stream = mx.stream(mx.gpu) if USE_STREAM else None
+
         def gen(prompt: str, max_tokens: int) -> Tuple[str, float, float, int]:
             """Generate tokens and measure timing.
 
@@ -449,11 +456,22 @@ def benchmark_mlx() -> Optional[Tuple[BenchmarkResult, RooflineResult, AccuracyS
             tokens_generated = 0
             response = ""
 
-            for chunk in stream_generate(model, tokenizer, prompt=prompt, max_tokens=max_tokens):
-                if ttft is None:
-                    ttft = (time.perf_counter() - start) * 1000
-                response += chunk.text if hasattr(chunk, 'text') else str(chunk)
-                tokens_generated += 1
+            # Use stream context and prefetch step size
+            gen_kwargs = {"prompt": prompt, "max_tokens": max_tokens, "prefill_step_size": PREFETCH_STEP_SIZE}
+
+            if stream:
+                with stream:
+                    for chunk in stream_generate(model, tokenizer, **gen_kwargs):
+                        if ttft is None:
+                            ttft = (time.perf_counter() - start) * 1000
+                        response += chunk.text if hasattr(chunk, 'text') else str(chunk)
+                        tokens_generated += 1
+            else:
+                for chunk in stream_generate(model, tokenizer, **gen_kwargs):
+                    if ttft is None:
+                        ttft = (time.perf_counter() - start) * 1000
+                    response += chunk.text if hasattr(chunk, 'text') else str(chunk)
+                    tokens_generated += 1
 
             total_ms = (time.perf_counter() - start) * 1000
             if ttft is None:
