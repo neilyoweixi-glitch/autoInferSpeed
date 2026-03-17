@@ -8,16 +8,14 @@ Usage: python benchmark.py
 import os
 import sys
 import time
-import json
-import subprocess
 from dataclasses import dataclass
 from typing import Optional, List, Tuple
 from datetime import datetime
 
 # Configuration - AGENT MODIFIES THESE
-MODEL_NAME = "Qwen/Qwen3-1.7B"  # Smaller for faster testing
+MODEL_NAME = "Qwen/Qwen3.5-2B"  # Target model for Mac
 PROMPT = "Write a short story about a robot learning to paint."
-MAX_TOKENS = 100
+MAX_TOKENS = 50  # Shorter for faster testing
 NUM_WARMUP = 1
 NUM_RUNS = 3
 BATCH_SIZE = 1  # Fixed per requirements
@@ -26,8 +24,6 @@ BATCH_SIZE = 1  # Fixed per requirements
 RESULTS_FILE = "results.tsv"
 
 # Baseline targets (from research)
-# M1/M2 typical: 30-60 tok/sec for 2B model
-# MLX optimized: 2x improvement possible
 BASELINE_TOK_SEC = 30
 
 
@@ -53,30 +49,6 @@ def get_memory_mb() -> float:
         return 0.0
 
 
-def measure_generation(gen_func, prompt: str, max_tokens: int) -> Tuple[str, float, float, int]:
-    """
-    Measure generation performance.
-    Returns: (generated_text, ttft_ms, total_ms, num_tokens)
-    """
-    start = time.perf_counter()
-
-    # Generate with timing
-    result = gen_func(prompt, max_tokens)
-
-    end = time.perf_counter()
-    total_ms = (end - start) * 1000
-
-    # Extract results
-    if isinstance(result, tuple):
-        text, ttft_ms, tokens = result
-    else:
-        text = result
-        ttft_ms = total_ms  # Approximate if not provided
-        tokens = len(text.split())  # Rough estimate
-
-    return text, ttft_ms, total_ms, tokens
-
-
 # =============================================================================
 # Backend Implementations
 # =============================================================================
@@ -85,7 +57,7 @@ def benchmark_transformers_mps(precision: str = "fp16") -> Optional[BenchmarkRes
     """Benchmark using HuggingFace transformers with MPS."""
     try:
         import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer
+        from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 
         print(f"  Loading model with transformers ({precision})...")
 
@@ -100,11 +72,14 @@ def benchmark_transformers_mps(precision: str = "fp16") -> Optional[BenchmarkRes
         # Load model
         dtype = torch.float16 if precision == "fp16" else torch.float32
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+
+        # Fix for Qwen3.5 - use device_map instead of .to()
         model = AutoModelForCausalLM.from_pretrained(
             MODEL_NAME,
             torch_dtype=dtype,
             trust_remote_code=True,
-        ).to(device)
+            device_map=device,
+        )
         model.eval()
 
         mem_before = get_memory_mb()
@@ -112,8 +87,7 @@ def benchmark_transformers_mps(precision: str = "fp16") -> Optional[BenchmarkRes
         def generate(prompt: str, max_tokens: int) -> Tuple[str, float, int]:
             inputs = tokenizer(prompt, return_tensors="pt").to(device)
 
-            # Time to first token
-            ttft_start = time.perf_counter()
+            start = time.perf_counter()
             with torch.no_grad():
                 outputs = model.generate(
                     **inputs,
@@ -121,28 +95,29 @@ def benchmark_transformers_mps(precision: str = "fp16") -> Optional[BenchmarkRes
                     do_sample=False,
                     pad_token_id=tokenizer.eos_token_id,
                 )
-            ttft_ms = (time.perf_counter() - ttft_start) * 1000
+            total_ms = (time.perf_counter() - start) * 1000
 
-            text = tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-            tokens = len(outputs[0]) - inputs["input_ids"].shape[1]
-            return text, ttft_ms, tokens
+            # Decode only the new tokens
+            new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
+            text = tokenizer.decode(new_tokens, skip_special_tokens=True)
+            num_tokens = len(new_tokens)
+
+            return text, total_ms, num_tokens
 
         # Warmup
         print("  Warming up...")
-        generate(PROMPT, 10)
+        generate(PROMPT, 5)
 
         # Benchmark
         print("  Benchmarking...")
-        ttfts, latencies, tokens_list = [], [], []
+        latencies, tokens_list = [], []
         for _ in range(NUM_RUNS):
-            _, ttft_ms, total_ms, tokens = measure_generation(generate, PROMPT, MAX_TOKENS)
-            ttfts.append(ttft_ms)
+            _, total_ms, tokens = generate(PROMPT, MAX_TOKENS)
             latencies.append(total_ms)
             tokens_list.append(tokens)
 
         mem_after = get_memory_mb()
 
-        avg_ttft = sum(ttfts) / len(ttfts)
         avg_latency = sum(latencies) / len(latencies)
         avg_tokens = sum(tokens_list) / len(tokens_list)
         tok_per_sec = (avg_tokens / avg_latency) * 1000
@@ -157,7 +132,7 @@ def benchmark_transformers_mps(precision: str = "fp16") -> Optional[BenchmarkRes
             backend="transformers",
             precision=precision,
             tokens_per_sec=tok_per_sec,
-            time_to_first_token_ms=avg_ttft,
+            time_to_first_token_ms=avg_latency,  # Approximate (no streaming)
             total_latency_ms=avg_latency,
             tokens_generated=int(avg_tokens),
             memory_mb=mem_after - mem_before,
@@ -171,7 +146,6 @@ def benchmark_transformers_mps(precision: str = "fp16") -> Optional[BenchmarkRes
 def benchmark_mlx(precision: str = "fp16") -> Optional[BenchmarkResult]:
     """Benchmark using Apple MLX framework."""
     try:
-        import mlx.core as mx
         from mlx_lm import load, generate
 
         print(f"  Loading model with MLX ({precision})...")
@@ -182,51 +156,49 @@ def benchmark_mlx(precision: str = "fp16") -> Optional[BenchmarkResult]:
         model, tokenizer = load(MODEL_NAME)
 
         def gen(prompt: str, max_tokens: int) -> Tuple[str, float, int]:
-            ttft_start = time.perf_counter()
+            start = time.perf_counter()
 
+            # MLX-LM generate returns the full response
             response = generate(
                 model,
                 tokenizer,
                 prompt=prompt,
                 max_tokens=max_tokens,
-                temp=0.0,  # Greedy for reproducibility
+                verbose=False,
             )
 
-            ttft_ms = (time.perf_counter() - ttft_start) * 1000
+            total_ms = (time.perf_counter() - start) * 1000
 
             # Count tokens
             tokens = len(tokenizer.encode(response))
 
-            return response, ttft_ms, tokens
+            return response, total_ms, tokens
 
         # Warmup
         print("  Warming up...")
-        gen(PROMPT, 10)
+        gen(PROMPT, 5)
 
         # Benchmark
         print("  Benchmarking...")
-        ttfts, latencies, tokens_list = [], [], []
+        latencies, tokens_list = [], []
         for _ in range(NUM_RUNS):
-            _, ttft_ms, total_ms, tokens = measure_generation(gen, PROMPT, MAX_TOKENS)
-            ttfts.append(ttft_ms)
+            _, total_ms, tokens = gen(PROMPT, MAX_TOKENS)
             latencies.append(total_ms)
             tokens_list.append(tokens)
 
         mem_after = get_memory_mb()
 
-        avg_ttft = sum(ttfts) / len(ttfts)
         avg_latency = sum(latencies) / len(latencies)
         avg_tokens = sum(tokens_list) / len(tokens_list)
         tok_per_sec = (avg_tokens / avg_latency) * 1000
 
-        # Cleanup
         del model
 
         return BenchmarkResult(
             backend="mlx",
             precision=precision,
             tokens_per_sec=tok_per_sec,
-            time_to_first_token_ms=avg_ttft,
+            time_to_first_token_ms=avg_latency,  # Approximate
             total_latency_ms=avg_latency,
             tokens_generated=int(avg_tokens),
             memory_mb=mem_after - mem_before,
@@ -240,44 +212,45 @@ def benchmark_mlx(precision: str = "fp16") -> Optional[BenchmarkResult]:
         return None
 
 
-def benchmark_mlx_quantized(bits: int = 4) -> Optional[BenchmarkResult]:
-    """Benchmark MLX with quantization."""
+def benchmark_mlx_prequantized(bits: int = 4) -> Optional[BenchmarkResult]:
+    """Benchmark MLX with pre-quantized model from HuggingFace."""
     try:
-        import mlx.core as mx
         from mlx_lm import load, generate
-        from mlx_lm.utils import quantize_model
 
-        print(f"  Loading model with MLX ({bits}-bit quantization)...")
+        # Try MLX Community quantized models
+        quantized_model = f"mlx-community/{MODEL_NAME.split('/')[1]}-{bits}bit"
+
+        print(f"  Loading pre-quantized model: {quantized_model}...")
 
         mem_before = get_memory_mb()
 
-        # Load and quantize
-        model, tokenizer = load(MODEL_NAME)
-        model, _ = quantize_model(model, bits=bits)
+        try:
+            model, tokenizer = load(quantized_model)
+        except Exception as e:
+            print(f"  Pre-quantized model not available: {e}")
+            return None
 
         def gen(prompt: str, max_tokens: int) -> Tuple[str, float, int]:
-            ttft_start = time.perf_counter()
-            response = generate(model, tokenizer, prompt=prompt, max_tokens=max_tokens, temp=0.0)
-            ttft_ms = (time.perf_counter() - ttft_start) * 1000
+            start = time.perf_counter()
+            response = generate(model, tokenizer, prompt=prompt, max_tokens=max_tokens, verbose=False)
+            total_ms = (time.perf_counter() - start) * 1000
             tokens = len(tokenizer.encode(response))
-            return response, ttft_ms, tokens
+            return response, total_ms, tokens
 
         # Warmup
         print("  Warming up...")
-        gen(PROMPT, 10)
+        gen(PROMPT, 5)
 
         # Benchmark
         print("  Benchmarking...")
-        ttfts, latencies, tokens_list = [], [], []
+        latencies, tokens_list = [], []
         for _ in range(NUM_RUNS):
-            _, ttft_ms, total_ms, tokens = measure_generation(gen, PROMPT, MAX_TOKENS)
-            ttfts.append(ttft_ms)
+            _, total_ms, tokens = gen(PROMPT, MAX_TOKENS)
             latencies.append(total_ms)
             tokens_list.append(tokens)
 
         mem_after = get_memory_mb()
 
-        avg_ttft = sum(ttfts) / len(ttfts)
         avg_latency = sum(latencies) / len(latencies)
         avg_tokens = sum(tokens_list) / len(tokens_list)
         tok_per_sec = (avg_tokens / avg_latency) * 1000
@@ -288,7 +261,7 @@ def benchmark_mlx_quantized(bits: int = 4) -> Optional[BenchmarkResult]:
             backend="mlx_quantized",
             precision=f"{bits}bit",
             tokens_per_sec=tok_per_sec,
-            time_to_first_token_ms=avg_ttft,
+            time_to_first_token_ms=avg_latency,
             total_latency_ms=avg_latency,
             tokens_generated=int(avg_tokens),
             memory_mb=mem_after - mem_before,
@@ -302,74 +275,72 @@ def benchmark_mlx_quantized(bits: int = 4) -> Optional[BenchmarkResult]:
         return None
 
 
-def benchmark_llamacpp() -> Optional[BenchmarkResult]:
-    """Benchmark using llama.cpp (if GGUF model available)."""
+def benchmark_ollama() -> Optional[BenchmarkResult]:
+    """Benchmark using Ollama (if installed)."""
     try:
-        from llama_cpp import Llama
+        import subprocess
+        import json
 
-        print("  Loading model with llama.cpp...")
+        print("  Checking Ollama...")
+
+        # Check if ollama is installed
+        result = subprocess.run(["which", "ollama"], capture_output=True)
+        if result.returncode != 0:
+            print("  Ollama not installed, skipping")
+            return None
 
         mem_before = get_memory_mb()
 
-        # Try to find or download GGUF model
-        # For Qwen, we'd need to convert or find a pre-converted GGUF
-        # This is a simplified version
-        gguf_path = os.path.expanduser("~/.cache/inferspeed/model.gguf")
-
-        if not os.path.exists(gguf_path):
-            print("  GGUF model not found, skipping llama.cpp")
-            return None
-
-        llm = Llama(
-            model_path=gguf_path,
-            n_ctx=512,
-            n_gpu_layers=-1,  # Use all GPU layers
-            verbose=False,
-        )
+        # Pull model if needed
+        model_name = MODEL_NAME.split("/")[1].lower()
+        print(f"  Using Ollama model: {model_name}")
 
         def gen(prompt: str, max_tokens: int) -> Tuple[str, float, int]:
-            ttft_start = time.perf_counter()
-            output = llm(prompt, max_tokens=max_tokens, temperature=0.0)
-            ttft_ms = (time.perf_counter() - ttft_start) * 1000
-            text = output["choices"][0]["text"]
-            tokens = output["usage"]["completion_tokens"]
-            return text, ttft_ms, tokens
+            start = time.perf_counter()
+
+            result = subprocess.run(
+                ["ollama", "run", model_name, prompt],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+
+            total_ms = (time.perf_counter() - start) * 1000
+            response = result.stdout.strip()
+
+            # Rough token count (words * 1.3)
+            tokens = int(len(response.split()) * 1.3)
+
+            return response, total_ms, tokens
 
         # Warmup
         print("  Warming up...")
-        gen(PROMPT, 10)
+        gen("Hi", 5)
 
         # Benchmark
         print("  Benchmarking...")
-        ttfts, latencies, tokens_list = [], [], []
+        latencies, tokens_list = [], []
         for _ in range(NUM_RUNS):
-            _, ttft_ms, total_ms, tokens = measure_generation(gen, PROMPT, MAX_TOKENS)
-            ttfts.append(ttft_ms)
+            _, total_ms, tokens = gen(PROMPT, MAX_TOKENS)
             latencies.append(total_ms)
             tokens_list.append(tokens)
 
         mem_after = get_memory_mb()
 
-        avg_ttft = sum(ttfts) / len(ttfts)
         avg_latency = sum(latencies) / len(latencies)
         avg_tokens = sum(tokens_list) / len(tokens_list)
         tok_per_sec = (avg_tokens / avg_latency) * 1000
 
-        del llm
-
         return BenchmarkResult(
-            backend="llamacpp",
-            precision="gguf",
+            backend="ollama",
+            precision="native",
             tokens_per_sec=tok_per_sec,
-            time_to_first_token_ms=avg_ttft,
+            time_to_first_token_ms=avg_latency,
             total_latency_ms=avg_latency,
             tokens_generated=int(avg_tokens),
             memory_mb=mem_after - mem_before,
         )
 
-    except ImportError:
-        print("  llama-cpp-python not installed, skipping")
-        return None
     except Exception as e:
         print(f"  Error: {e}")
         return None
@@ -395,9 +366,9 @@ def run_all_benchmarks() -> List[BenchmarkResult]:
         ("Transformers (MPS, fp16)", lambda: benchmark_transformers_mps("fp16")),
         ("Transformers (MPS, fp32)", lambda: benchmark_transformers_mps("fp32")),
         ("MLX (fp16)", lambda: benchmark_mlx("fp16")),
-        ("MLX (4-bit)", lambda: benchmark_mlx_quantized(4)),
-        ("MLX (8-bit)", lambda: benchmark_mlx_quantized(8)),
-        ("llama.cpp", lambda: benchmark_llamacpp()),
+        ("MLX 4-bit (pre-quantized)", lambda: benchmark_mlx_prequantized(4)),
+        ("MLX 8-bit (pre-quantized)", lambda: benchmark_mlx_prequantized(8)),
+        ("Ollama", lambda: benchmark_ollama()),
     ]
 
     for name, benchmark_fn in backends:
@@ -405,7 +376,7 @@ def run_all_benchmarks() -> List[BenchmarkResult]:
         result = benchmark_fn()
         if result:
             results.append(result)
-            print(f"  ✓ {result.tokens_per_sec:.1f} tok/s | TTFT: {result.time_to_first_token_ms:.1f}ms | Memory: {result.memory_mb:.0f}MB")
+            print(f"  ✓ {result.tokens_per_sec:.1f} tok/s | Latency: {result.total_latency_ms:.0f}ms | Memory: {result.memory_mb:.0f}MB")
         else:
             print(f"  ✗ Skipped")
 
@@ -437,25 +408,24 @@ def print_summary(results: List[BenchmarkResult]):
     # Sort by tokens per second
     sorted_results = sorted(results, key=lambda x: x.tokens_per_sec, reverse=True)
 
-    print(f"\n{'Backend':<20} {'Precision':<10} {'tok/s':>10} {'TTFT(ms)':>10} {'Memory(MB)':>12}")
-    print("-"*62)
+    print(f"\n{'Backend':<25} {'Precision':<10} {'tok/s':>8} {'Latency(ms)':>12} {'Memory(MB)':>10}")
+    print("-"*65)
 
     for r in sorted_results:
-        print(f"{r.backend:<20} {r.precision:<10} {r.tokens_per_sec:>10.1f} {r.time_to_first_token_ms:>10.1f} {r.memory_mb:>12.0f}")
+        print(f"{r.backend:<25} {r.precision:<10} {r.tokens_per_sec:>8.1f} {r.total_latency_ms:>12.0f} {r.memory_mb:>10.0f}")
 
     # Best result
     best = sorted_results[0]
-    print("\n" + "-"*62)
+    print("\n" + "-"*65)
     print(f"BEST: {best.backend} ({best.precision})")
     print(f"  Tokens/sec: {best.tokens_per_sec:.1f}")
-    print(f"  TTFT: {best.time_to_first_token_ms:.1f}ms")
+    print(f"  Latency: {best.total_latency_ms:.0f}ms")
     print(f"  Memory: {best.memory_mb:.0f}MB")
 
     # Comparison to baseline
     improvement = ((best.tokens_per_sec - BASELINE_TOK_SEC) / BASELINE_TOK_SEC) * 100
     print(f"  vs Baseline ({BASELINE_TOK_SEC} tok/s): {improvement:+.1f}%")
-
-    print("-"*62)
+    print("-"*65)
 
 
 def main():

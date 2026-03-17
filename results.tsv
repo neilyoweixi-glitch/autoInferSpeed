@@ -1,3 +1,9 @@
 timestamp	backend	precision	tokens_per_sec	ttft_ms	latency_ms	tokens	memory_mb	notes
 baseline	mlx	fp16	30.0	100	3300	100	2000	Expected baseline for M1/M2 from research
 baseline	transformers	fp16	15.0	200	6600	100	2500	PyTorch MPS baseline
+2026-03-17T17:26:35.030117	mlx	fp16	22.64	2208.6	2208.6	50	3675	
+2026-03-17T17:26:35.030150	mlx_quantized	4bit	66.63	750.4	750.4	50	-2250	
+2026-03-17T17:26:35.030155	mlx_quantized	8bit	39.64	1261.3	1261.3	50	954	
+2026-03-17T17:27:19.987255	mlx	fp16	22.64	2208.1	2208.1	50	3673	
+2026-03-17T17:27:19.987277	mlx_quantized	4bit	67.08	745.4	745.4	50	-3807	
+2026-03-17T17:27:19.987281	mlx_quantized	8bit	40.30	1240.6	1240.6	50	1936	
