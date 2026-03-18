@@ -36,7 +36,7 @@ NUM_WARMUP = 2
 NUM_RUNS = 3
 
 USE_STREAM = True
-PREFETCH_STEP_SIZE = 8192  # Larger step for better throughput
+PREFETCH_STEP_SIZE = 4096  # Smaller chunks to reduce memory pressure
 USE_COMPILE = False  # mx.compile() doesn't help with cached KV
 USE_ASYNC_EVAL = True  # Use mx.async_eval() for overlapping
 
