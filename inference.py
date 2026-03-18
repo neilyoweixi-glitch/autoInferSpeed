@@ -37,7 +37,7 @@ NUM_RUNS = 3
 
 USE_STREAM = True
 PREFETCH_STEP_SIZE = 4096  # Smaller chunks to reduce memory pressure
-USE_COMPILE = False  # mx.compile() doesn't help with cached KV
+USE_COMPILE = False  # Use MX_COMPILE=1 env var for global JIT instead
 USE_ASYNC_EVAL = True  # Use mx.async_eval() for overlapping
 
 # KV cache quantization (memory optimization for decode)
