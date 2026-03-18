@@ -7,6 +7,8 @@ This is an experiment to have the LLM autonomously maximize inference speed for 
 - **Model**: Qwen3.5-2B 8-bit quantized (`mlx-community/Qwen3.5-2B-8bit`). Do not switch models. All optimizations must target this exact model.
 - **Backend**: MLX only. Apple Silicon native. No Transformers, vLLM, SGLang, or Ollama.
 - **Correctness**: Every optimization must pass the accuracy verification suite. Speed without correctness is worthless.
+- **No algorithmic shortcuts**: Speculative decoding, early exit, layer skipping, prompt-lookup decoding, and any other algorithmic changes that alter the computation graph are **forbidden**. The goal is to make the *same computation* run faster through kernel-level, memory-level, and hardware-level optimizations — not to do less computation.
+- **`prepare.py` is immutable**: The agent MUST NOT modify `prepare.py`. It contains test data, accuracy verification, hardware detection, and data classes. Only the human may edit it.
 
 ## Setup
 
@@ -16,7 +18,8 @@ To set up a new experiment, work with the user to:
 2. **Create the branch**: `git checkout -b autoinfer/<tag>` from current main.
 3. **Read the in-scope files**: The repo is small. Read these files for full context:
    - `README.md` — repository context.
-   - `inference.py` — the file you modify. Backend implementations, benchmark harness, accuracy verification, and configuration.
+   - `inference.py` — the file you modify. Benchmark harness, optimization flags, and configuration.
+   - `prepare.py` — DO NOT MODIFY. Test data, accuracy verification, hardware detection, data classes.
    - `pyproject.toml` — dependencies. Do not add new packages.
 4. **Verify dependencies**: Run `uv sync` if needed. Check that `uv run python -c "import mlx.core as mx; print(mx.metal.is_available())"` returns True.
 5. **Establish the baseline**: Run `inference.py` unmodified to record the baseline. This first run serves two purposes:
@@ -87,9 +90,14 @@ OVERALL: PASS (avg token match: 96.0%)
 Each experiment runs on Apple Silicon. You launch it simply as: `uv run inference.py`.
 
 **What you CAN do:**
-- Modify `inference.py` — this is the only file you edit. You may also create new `.py` files if you need custom Metal kernels or helper modules, but `inference.py` remains the entry point.
+- Modify `inference.py` — this is the primary file you edit. You may also create new `.py` files if you need custom Metal kernels or helper modules, but `inference.py` remains the entry point.
+- Write custom Metal shaders (`.metal` files) or Metal kernel wrappers.
+- Experiment with MLX internals: `mx.compile()`, `mx.stream()`, `mx.async_eval()`, custom kernels.
 
 **What you CANNOT do:**
+- **Modify `prepare.py`** — it is immutable. Test data, accuracy checks, and data classes live there.
+- **Use speculative decoding** — no draft models, no self-speculative, no prompt-lookup decoding.
+- **Use algorithmic shortcuts** — no early exit, no layer skipping, no dynamic computation graphs. The model must execute the same forward pass. You optimize *how* the computation runs, not *what* computation runs.
 - Install new packages or add dependencies beyond what's in `pyproject.toml`. Use `uv sync` to install, never `pip`.
 - Change the model (must remain Qwen3.5-2B 8-bit).
 - Skip or weaken the accuracy verification.
@@ -278,12 +286,6 @@ The following are ordered roughly from easiest to hardest. Focus on what moves t
 - Use Accelerate framework for CPU-side matrix ops on efficiency cores
 - Parallelize KV cache management on CPU while GPU computes
 
-**Speculative and algorithmic:**
-- Self-speculative decoding (use early layers to predict, full model to verify)
-- Prompt-lookup decoding for repetitive outputs
-- Dynamic early exit (skip later layers for high-confidence tokens)
-- Continuous batching of KV cache updates
-
 **MLX-specific:**
 - `mx.metal.start_capture()` / `mx.metal.stop_capture()` for Metal profiling
 - Experiment with `mx.stream()` for async execution
@@ -389,9 +391,17 @@ LOOP FOREVER:
 
 **Crashes**: If a run crashes (OOM, import error, etc.), use your judgment: If it's something dumb and easy to fix, fix and re-run. If fundamentally broken, skip it, log "crash", and move on.
 
-**NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a good stopping point?". The human might be asleep, or gone from a computer and expects you to continue working *indefinitely* until you are manually stopped. You are autonomous. If you run out of ideas, think harder — read the roofline data, profile the bottleneck, try combining approaches, write custom kernels. The loop runs until the human interrupts you, period.
+**NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a good stopping point?". The human might be asleep, or gone from a computer and expects you to continue working *indefinitely* until you are manually stopped. You are autonomous. The loop runs until the human interrupts you, period.
+
+**When you run out of ideas, research new ones.** Do NOT stop because you feel stuck. Instead:
+1. **Profile deeper**: Use `mx.metal.start_capture()` to get a Metal trace. Read it. Find which kernels are slow and why.
+2. **Read MLX source code**: The MLX repo is open source. Read the Metal kernel implementations for quantized matmul, attention, and RMSNorm. Look for suboptimal tiling, unnecessary synchronization, or missing fusion opportunities.
+3. **Study the hardware**: Read Apple's Metal Best Practices Guide and GPU programming documentation. Understand SIMD group size, threadgroup memory, and optimal access patterns for Apple Silicon.
+4. **Search for recent papers and techniques**: Look for new kernel optimization papers, Metal-specific optimization guides, or MLX community contributions. Web search for "MLX performance optimization", "Metal GPU kernel optimization", "Apple Silicon inference optimization".
+5. **Analyze the assembly**: Use Metal shader profiling to check if your custom kernels have register spills, bank conflicts, or suboptimal occupancy.
+6. **Combine approaches**: If individual optimizations gave small gains, try combining them. Fused RMSNorm + residual + quantized matmul might yield more than each alone.
 
 **Convergence**:
 - If **decode** bandwidth utilization exceeds 95% at batch=1, you are near the memory-bandwidth limit. Shift to: (a) higher batch sizes to move into compute-bound territory, (b) prefill optimization, or (c) CPU+GPU co-execution.
 - If **prefill** MFU exceeds 90%, you are near the compute limit. Shift to: (a) decode optimization, (b) chunked prefill for latency, or (c) explore whether longer sequences reveal new bottlenecks.
-- If both stages are converged, focus on combined end-to-end latency for realistic workloads (e.g. 256-token prompt + 50-token generation). But do not stop — keep trying creative approaches.
+- If both stages are converged, focus on combined end-to-end latency for realistic workloads (e.g. 256-token prompt + 50-token generation). But do not stop — research new kernel techniques, read hardware manuals, and keep trying creative approaches.

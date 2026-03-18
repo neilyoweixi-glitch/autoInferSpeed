@@ -49,7 +49,8 @@ Hi, have a look at program.md and let's kick off inference optimization! Let's d
 ## Project structure
 
 ```
-inference.py    — inference harness + accuracy verification + roofline analysis (agent modifies this)
+inference.py    — benchmark harness + optimization flags (agent modifies this)
+prepare.py      — test data, accuracy verification, hardware detection (immutable)
 program.md      — autonomous agent protocol
 results.tsv     — experiment log (untracked by git)
 pyproject.toml  — dependencies
