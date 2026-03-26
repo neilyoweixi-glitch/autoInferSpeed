@@ -1,0 +1,88 @@
+
+============================================================
+BENCHMARK: Qwen3.5-2B 8-bit
+============================================================
+
+Loading model: mlx-community/Qwen3.5-2B-8bit...
+Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files: 100%|██████████| 10/10 [00:00<00:00, 138884.24it/s]
+Chip: Apple M4 (10-core GPU, 120 GB/s, 5.4 TFLOPS)
+
+[PREFILL BENCHMARK]
+  Prefill seq_len=32...
+  Prefill seq_len=64...
+  Prefill seq_len=128...
+  Prefill seq_len=256...
+  Prefill seq_len=512...
+  Prefill seq_len=1024...
+  Prefill seq_len=2048...
+  Prefill seq_len=4096...
+  Prefill seq_len=8192...
+  Prefill seq_len=16384...
+
+[DECODE BENCHMARK]
+  Decode context=256...
+    constraint=20ms: CONSTRAINT_EXCEEDED
+    constraint=30ms: batch=1 tok/s=48.6 ms/tok=20.6
+    constraint=50ms: batch=1 tok/s=47.1 ms/tok=21.2
+    constraint=100ms: batch=1 tok/s=48.7 ms/tok=20.5
+    constraint=none: batch=1 tok/s=48.6 ms/tok=20.6
+  Decode context=1024...
+    constraint=20ms: CONSTRAINT_EXCEEDED
+    constraint=30ms: batch=1 tok/s=48.4 ms/tok=20.7
+    constraint=50ms: batch=1 tok/s=48.5 ms/tok=20.6
+    constraint=100ms: batch=1 tok/s=48.3 ms/tok=20.7
+    constraint=none: batch=1 tok/s=48.6 ms/tok=20.6
+
+[ACCURACY VERIFICATION]
+
+============================================================
+BENCHMARK RESULTS
+============================================================
+
+PREFILL BENCHMARK
+  seq_len=32     TTFT=    77ms  prefill_tok/s=   415  MFU= 30.7%  [< 15ms EXCEEDED]
+  seq_len=64     TTFT=   109ms  prefill_tok/s=   586  MFU= 43.4%  [< 20ms EXCEEDED]
+  seq_len=128    TTFT=   164ms  prefill_tok/s=   780  MFU= 57.8%  [< 30ms EXCEEDED]
+  seq_len=256    TTFT=   280ms  prefill_tok/s=   913  MFU= 67.7%  [< 50ms EXCEEDED]
+  seq_len=512    TTFT=   480ms  prefill_tok/s=  1067  MFU= 79.0%  [< 100ms EXCEEDED]
+  seq_len=1024   TTFT=   919ms  prefill_tok/s=  1114  MFU= 82.5%  [< 200ms EXCEEDED]
+  seq_len=2048   TTFT=  1784ms  prefill_tok/s=  1148  MFU= 85.0%  [< 400ms EXCEEDED]
+  seq_len=4096   TTFT=  3582ms  prefill_tok/s=  1143  MFU= 84.7%  [< 800ms EXCEEDED]
+  seq_len=8192   TTFT=  7380ms  prefill_tok/s=  1110  MFU= 82.2%  [< 1600ms EXCEEDED]
+  seq_len=16384  TTFT= 15498ms  prefill_tok/s=  1057  MFU= 78.3%  [< 3200ms EXCEEDED]
+
+DECODE BENCHMARK
+  (context=256)
+    constraint=20ms   CONSTRAINT_EXCEEDED
+    constraint=30ms   max_batch=1   tok/s=  48.6  ms/tok= 20.6  MEMORY_BOUND
+    constraint=50ms   max_batch=1   tok/s=  47.1  ms/tok= 21.2  MEMORY_BOUND
+    constraint=100ms  max_batch=1   tok/s=  48.7  ms/tok= 20.5  MEMORY_BOUND
+    constraint=none   max_batch=1   tok/s=  48.6  ms/tok= 20.6  MEMORY_BOUND
+  (context=1024)
+    constraint=20ms   CONSTRAINT_EXCEEDED
+    constraint=30ms   max_batch=1   tok/s=  48.4  ms/tok= 20.7  MEMORY_BOUND
+    constraint=50ms   max_batch=1   tok/s=  48.5  ms/tok= 20.6  MEMORY_BOUND
+    constraint=100ms  max_batch=1   tok/s=  48.3  ms/tok= 20.7  MEMORY_BOUND
+    constraint=none   max_batch=1   tok/s=  48.6  ms/tok= 20.6  MEMORY_BOUND
+
+ACCURACY VERIFICATION (vs baseline)
+  "The capital of France is"  tokens: 50/50 (100%)  first_div: none  semantic: PASS
+  "What is 127 + 385? The answer is"  tokens: 49/49 (100%)  first_div: none  semantic: PASS
+  "Write a Python function that returns the..."  tokens: 50/50 (100%)  first_div: none  semantic: N/A
+  "If all roses are flowers and some flower..."  tokens: 50/50 (100%)  first_div: none  semantic: PASS
+  "Explain how photosynthesis works in thre..."  tokens: 50/50 (100%)  first_div: none  semantic: N/A
+  OVERALL: PASS (avg token match: 100.0%)
+
+ROOFLINE ANALYSIS
+  chip: Apple M4 (10-core GPU, 120 GB/s, 5.4 TFLOPS)
+  model_size: 2.47 GB (8-bit quantized)
+
+  PREFILL ROOFLINE (compute-bound regime)
+    peak_flops: 5.4 TFLOPS
+    seq_len=256: achieved 3.7 TFLOPS (MFU=68%)
+    seq_len=1024: achieved 4.5 TFLOPS (MFU=83%)
+
+  DECODE ROOFLINE (memory-bandwidth-bound at batch=1)
+    roofline_tok_s: 48.6 tok/s (120 GB/s / 2.47 GB)
+    batch=1: actual 0.0 tok/s, bandwidth_util=0%
+------------------------------------------------------------

@@ -36,8 +36,8 @@ NUM_WARMUP = 2
 NUM_RUNS = 3
 
 USE_STREAM = True
-PREFETCH_STEP_SIZE = 8192  # Larger step for better throughput
-USE_COMPILE = False  # mx.compile() doesn't help with cached KV
+PREFETCH_STEP_SIZE = 4096  # Smaller chunks to reduce memory pressure
+USE_COMPILE = False  # Use MX_COMPILE=1 env var for global JIT instead
 USE_ASYNC_EVAL = True  # Use mx.async_eval() for overlapping
 
 # KV cache quantization (memory optimization for decode)
@@ -50,6 +50,24 @@ KV_QUANT_START = 0
 # Benchmark Functions
 # =============================================================================
 
+def get_optimal_step_size(seq_len: int) -> int:
+    """Dynamic prefill step size based on sequence length.
+
+    Use smaller chunks for shorter sequences to reduce memory pressure,
+    larger chunks for longer sequences to reduce chunk boundary overhead.
+    """
+    if seq_len <= 512:
+        return 512  # 1-2 chunks for short sequences
+    elif seq_len <= 2048:
+        return 1024  # 2 chunks for medium sequences
+    elif seq_len <= 4096:
+        return 2048  # 2 chunks
+    elif seq_len <= 8192:
+        return 4096  # 2 chunks
+    else:
+        return 4096  # 4 chunks for 16K (best found)
+
+
 def benchmark_prefill(model, tokenizer, stream, chip_info) -> List[PrefillResult]:
     """Benchmark prefill across all sequence lengths."""
     from mlx_lm.generate import generate_step
@@ -61,13 +79,16 @@ def benchmark_prefill(model, tokenizer, stream, chip_info) -> List[PrefillResult
     for seq_len in PREFILL_SEQ_LENS:
         print(f"  Prefill seq_len={seq_len}...")
 
+        # Dynamic step size
+        step_size = get_optimal_step_size(seq_len)
+
         # Generate synthetic prompt tokens
         prompt = generate_synthetic_prompt(tokenizer, seq_len)
         prompt_tokens = mx.array(tokenizer.encode(prompt))
 
         # Warmup
         mx.clear_cache()
-        gen = generate_step(prompt_tokens, model, max_tokens=1, prefill_step_size=PREFETCH_STEP_SIZE,
+        gen = generate_step(prompt_tokens, model, max_tokens=1, prefill_step_size=step_size,
                           kv_bits=KV_BITS, kv_group_size=KV_GROUP_SIZE, quantized_kv_start=KV_QUANT_START)
         _ = next(gen, None)
         del gen
@@ -79,7 +100,7 @@ def benchmark_prefill(model, tokenizer, stream, chip_info) -> List[PrefillResult
             mem_before = get_memory_mb()
             start = time.perf_counter()
 
-            gen = generate_step(prompt_tokens, model, max_tokens=1, prefill_step_size=PREFETCH_STEP_SIZE,
+            gen = generate_step(prompt_tokens, model, max_tokens=1, prefill_step_size=step_size,
                               kv_bits=KV_BITS, kv_group_size=KV_GROUP_SIZE, quantized_kv_start=KV_QUANT_START)
             first_token, _ = next(gen)
 
