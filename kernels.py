@@ -54,32 +54,35 @@ def fused_silu_mul(gate: mx.array, up: mx.array) -> mx.array:
 
 # Fused RMSNorm + residual addition kernel
 # Computes: output = x + rms_norm(hidden) * weight
-RMSNORM_ADD_KERNEL = """
+def _make_rmsnorm_add_kernel(eps: float):
+    """Create RMSNorm+Add kernel with hardcoded eps value."""
+    source = f"""
 uint elem = thread_position_in_grid.x;
 uint hidden_size = weight_shape[0];
 
 // Compute RMS over the last dimension
 uint row_start = (elem / hidden_size) * hidden_size;
 float sum_sq = 0.0;
-for (uint i = 0; i < hidden_size; i++) {
+for (uint i = 0; i < hidden_size; i++) {{
     float h = hidden[row_start + i];
     sum_sq += h * h;
-}
-float rms = metal::sqrt(sum_sq / float(hidden_size) + eps);
+}}
+float rms = metal::sqrt(sum_sq / float(hidden_size) + {eps});
 
 // Normalize and add residual
 uint idx = elem % hidden_size;
 float normalized = hidden[elem] / rms;
 out[elem] = x[elem] + normalized * weight[idx];
 """
+    return mx.fast.metal_kernel(
+        name="rmsnorm_add",
+        input_names=["hidden", "weight", "x"],
+        output_names=["out"],
+        source=source,
+    )
 
 
-_rmsnorm_add_kernel = mx.fast.metal_kernel(
-    name="rmsnorm_add",
-    input_names=["hidden", "weight", "x"],
-    output_names=["out"],
-    source=RMSNORM_ADD_KERNEL,
-)
+_rmsnorm_add_kernel = _make_rmsnorm_add_kernel(1e-6)
 
 
 def fused_rmsnorm_add(hidden: mx.array, weight: mx.array, residual: mx.array, eps: float = 1e-6) -> mx.array:
@@ -101,6 +104,10 @@ def fused_rmsnorm_add(hidden: mx.array, weight: mx.array, residual: mx.array, ep
     """
     if hidden.shape != residual.shape:
         raise ValueError(f"Shape mismatch: hidden={hidden.shape}, residual={residual.shape}")
+
+    global _rmsnorm_add_kernel
+    if eps != 1e-6:
+        _rmsnorm_add_kernel = _make_rmsnorm_add_kernel(eps)
 
     B, L, D = hidden.shape
     outputs = _rmsnorm_add_kernel(

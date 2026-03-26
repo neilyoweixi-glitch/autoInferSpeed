@@ -149,10 +149,13 @@ def benchmark_decode(model, tokenizer, stream, chip_info) -> List[DecodeResult]:
         context_prompt = generate_synthetic_prompt(tokenizer, context_depth)
         context_tokens = mx.array(tokenizer.encode(context_prompt))
 
+        # Dynamic step size for prefill phase
+        step_size = get_optimal_step_size(context_depth)
+
         for constraint in DECODE_LATENCY_CONSTRAINTS:
             # Warmup first
             mx.clear_cache()
-            gen = generate_step(context_tokens, model, max_tokens=5, prefill_step_size=PREFETCH_STEP_SIZE,
+            gen = generate_step(context_tokens, model, max_tokens=5, prefill_step_size=step_size,
                               kv_bits=KV_BITS, kv_group_size=KV_GROUP_SIZE, quantized_kv_start=KV_QUANT_START)
             for _ in gen:
                 pass
@@ -164,7 +167,7 @@ def benchmark_decode(model, tokenizer, stream, chip_info) -> List[DecodeResult]:
                 mx.clear_cache()
                 start_total = time.perf_counter()
 
-                gen = generate_step(context_tokens, model, max_tokens=DECODE_TOKENS, prefill_step_size=PREFETCH_STEP_SIZE,
+                gen = generate_step(context_tokens, model, max_tokens=DECODE_TOKENS, prefill_step_size=step_size,
                                   kv_bits=KV_BITS, kv_group_size=KV_GROUP_SIZE, quantized_kv_start=KV_QUANT_START)
                 tokens_gen = 0
                 ttft = None
