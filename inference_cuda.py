@@ -19,9 +19,15 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 # Configuration
 # =============================================================================
 
-MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
-MODEL_PARAMS_B = 1.5  # 1.5B parameters
-MODEL_SIZE_FP16_GB = MODEL_PARAMS_B * 2 / 1  # ~3 GB for FP16
+# Fixed model: Qwen3.5-2B (same as Apple Silicon experiments)
+# Apple uses mlx-community/Qwen3.5-2B-8bit (MLX 8-bit quantized)
+# For CUDA, we use the base model with FP16/BF16
+MODEL_NAME = "Qwen/Qwen3.5-2B"  # Will try Qwen2.5-3B if not available
+MODEL_PARAMS_B = 2.0  # 2B parameters
+MODEL_SIZE_FP16_GB = MODEL_PARAMS_B * 2  # ~4 GB for FP16
+
+# Fallback models if Qwen3.5-2B not available
+FALLBACK_MODELS = ["Qwen/Qwen2.5-3B", "Qwen/Qwen2-1.5B"]
 
 # Prefill sequence lengths
 PREFILL_SEQ_LENS = [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
